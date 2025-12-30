@@ -11,6 +11,7 @@ import argparse
 import subprocess
 import signal
 import sys
+import logging
 from datetime import datetime
 from kucoin.client import Market
 
@@ -28,6 +29,166 @@ def _atomic_write_json(path, data):
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
+
+
+class BacktestLogger:
+    """
+    Structured logger for backtest events.
+    Provides both console output and JSON log files for analysis.
+    """
+
+    def __init__(self, log_dir="backtest_results/latest", console_level=logging.INFO):
+        """
+        Initialize backtest logger.
+
+        Args:
+            log_dir: Directory to store log files
+            console_level: Logging level for console output
+        """
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Create JSON log file path
+        self.json_log_path = os.path.join(log_dir, "backtest_events.jsonl")
+
+        # Set up console logger
+        self.console_logger = logging.getLogger("PowerTrader.Backtest")
+        self.console_logger.setLevel(console_level)
+
+        # Remove existing handlers to avoid duplicates
+        self.console_logger.handlers = []
+
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(console_level)
+        console_formatter = logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%H:%M:%S'
+        )
+        console_handler.setFormatter(console_formatter)
+        self.console_logger.addHandler(console_handler)
+
+    def _write_json_event(self, event_type, event_data):
+        """
+        Write event to JSON log file.
+
+        Args:
+            event_type: Event type string (replay_tick, trade_execution, neural_signal, error)
+            event_data: Dictionary of event data
+        """
+        event = {
+            "timestamp": time.time(),
+            "event_type": event_type,
+            "data": event_data
+        }
+
+        with open(self.json_log_path, "a") as f:
+            f.write(json.dumps(event) + "\n")
+
+    def log_replay_tick(self, sequence, timestamp, coins_updated):
+        """
+        Log a replay tick (timestamp advance).
+
+        Args:
+            sequence: Sequence number
+            timestamp: Current replay timestamp
+            coins_updated: List of coins updated this tick
+        """
+        self._write_json_event("replay_tick", {
+            "sequence": sequence,
+            "timestamp": timestamp,
+            "coins_updated": coins_updated,
+            "human_time": datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+    def log_trade_execution(self, order_id, side, symbol, qty, price, fees, slippage_bps, status):
+        """
+        Log a trade execution.
+
+        Args:
+            order_id: Order ID
+            side: "buy" or "sell"
+            symbol: Trading symbol
+            qty: Quantity
+            price: Fill price
+            fees: Fee amount
+            slippage_bps: Slippage in basis points
+            status: "filled" or "partial"
+        """
+        event_data = {
+            "order_id": order_id,
+            "side": side,
+            "symbol": symbol,
+            "qty": qty,
+            "price": price,
+            "fees": fees,
+            "slippage_bps": slippage_bps,
+            "status": status,
+            "notional": qty * price
+        }
+
+        self._write_json_event("trade_execution", event_data)
+
+        self.console_logger.info(
+            f"Trade: {side.upper()} {qty:.6f} {symbol} @ ${price:.2f} "
+            f"(slippage: {slippage_bps:.2f}bps, fees: ${fees:.2f})"
+        )
+
+    def log_neural_signal(self, coin, signal_type, signal_value):
+        """
+        Log a neural network signal generation.
+
+        Args:
+            coin: Coin symbol
+            signal_type: Signal type (long_dca, short_dca)
+            signal_value: Signal value (0-7)
+        """
+        event_data = {
+            "coin": coin,
+            "signal_type": signal_type,
+            "signal_value": signal_value
+        }
+
+        self._write_json_event("neural_signal", event_data)
+
+    def log_error(self, error_message, context=None):
+        """
+        Log an error with context.
+
+        Args:
+            error_message: Error message
+            context: Optional dictionary of context information
+        """
+        event_data = {
+            "error_message": str(error_message),
+            "context": context or {}
+        }
+
+        self._write_json_event("error", event_data)
+
+        self.console_logger.error(f"Error: {error_message}")
+        if context:
+            self.console_logger.error(f"  Context: {json.dumps(context, indent=2)}")
+
+    def log_info(self, message):
+        """
+        Log informational message to console.
+
+        Args:
+            message: Message to log
+        """
+        self.console_logger.info(message)
+
+    def log_warning(self, message):
+        """
+        Log warning message.
+
+        Args:
+            message: Warning message
+        """
+        self.console_logger.warning(message)
+
+        self._write_json_event("warning", {"message": message})
 
 
 def _get_timeframe_minutes(timeframe):
