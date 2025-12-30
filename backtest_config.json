@@ -1,0 +1,83 @@
+{
+  "_comment": "PowerTrader AI Backtesting Configuration",
+  "_comment2": "This file configures realistic execution simulation with expert-validated settings",
+
+  "initial_capital": 10000.0,
+  "backtest_start": "2024-01-01",
+  "backtest_end": "2024-12-31",
+
+  "execution_model": {
+    "_comment": "Realistic execution costs based on quant trader review",
+
+    "slippage_bps": 5.0,
+    "_slippage_note": "Base slippage: 0.05% (5 bps). Increases exponentially with order size.",
+
+    "fee_bps": 20.0,
+    "_fee_note": "Trading fees: 0.20% (20 bps) - Robinhood's effective taker fee",
+
+    "robinhood_spread_bps": 20.0,
+    "_robinhood_note": "Hidden cost of 'free' trading: Robinhood prices are ~20 bps worse than KuCoin raw orderbook",
+
+    "max_volume_pct": 1.0,
+    "_volume_note": "Max order size: 1% of candle volume. Larger orders get partial fills.",
+
+    "latency_ms_range": [50, 500],
+    "_latency_note": "Network latency simulation: 50-500ms causes additional slippage",
+
+    "partial_fill_behavior": "retry_next",
+    "_partial_note": "Options: 'cancel' (conservative), 'retry_next' (realistic), 'limit' (not implemented)"
+  },
+
+  "risk_management": {
+    "_comment": "Drawdown kill switch - stop backtest at realistic failure points",
+
+    "enable_kill_switch": true,
+    "_kill_note": "If disabled, backtest will run to completion even at -90% drawdown",
+
+    "max_drawdown_kill_pct": 50.0,
+    "_kill_threshold": "Stop simulation if equity drops 50% from peak. In reality, you would quit before this."
+  },
+
+  "walk_forward_validation": {
+    "_comment": "Prevent look-ahead bias by retraining model only on past data",
+
+    "retrain_interval_days": 7,
+    "_retrain_note": "Retrain neural model every 7 days using only data up to current timestamp",
+
+    "initial_training_months": 6,
+    "_training_note": "Use 6 months of data before backtest start for initial model training"
+  },
+
+  "performance": {
+    "_comment": "RAM disk eliminates IO bottleneck for 100x faster IPC",
+
+    "use_ramdisk": true,
+    "_ramdisk_note": "Requires Linux tmpfs (/dev/shm). Run ./setup_ramdisk.sh first.",
+
+    "ramdisk_path": "/dev/shm/powertrader_backtest",
+    "_path_note": "If use_ramdisk=false, falls back to ./replay_data/ (slower)"
+  },
+
+  "data_source": {
+    "_comment": "Historical data source",
+
+    "provider": "kucoin",
+    "_provider_note": "KuCoin has raw orderbook data. Robinhood prices are ~20 bps worse (accounted for above).",
+
+    "timeframe": "1h",
+    "_timeframe_note": "1-hour candles (standard for backtesting)",
+
+    "symbols": ["BTC", "ETH", "XRP", "BNB", "DOGE"],
+    "_symbols_note": "Coins to backtest (must match your live trading setup)"
+  },
+
+  "reporting": {
+    "_comment": "Output settings",
+
+    "save_equity_curve": true,
+    "save_trade_log": true,
+    "generate_html_report": true,
+    "compare_vs_buy_hold": true,
+    "_buy_hold_note": "Essential: If your AI returns 40% but BTC returns 120%, the AI failed (unless much lower drawdown)"
+  }
+}
