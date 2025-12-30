@@ -11,8 +11,15 @@ import os
 import colorama
 from colorama import Fore, Style
 import traceback
+import argparse
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
+
+# -----------------------------
+# REPLAY MODE GLOBALS (set by main block)
+# -----------------------------
+REPLAY_MODE = False
+REPLAY_OUTPUT_DIR = None
 
 # -----------------------------
 # GUI HUB OUTPUTS
@@ -694,6 +701,37 @@ class CryptoAPITrading:
         sell_prices = {}
         valid_symbols = []
 
+        # In replay mode, read prices from backtest_state.json
+        if REPLAY_MODE:
+            state_file = "replay_data/backtest_state.json"
+            if os.path.exists(state_file):
+                try:
+                    with open(state_file, "r") as f:
+                        state = json.load(f)
+                    prices = state.get("prices", {})
+
+                    for symbol in symbols:
+                        if symbol == "USDC-USD":
+                            continue
+
+                        # Extract coin from symbol (e.g., "BTC-USD" -> "BTC")
+                        coin = symbol.replace("-USD", "")
+
+                        if coin in prices:
+                            price_data = prices[coin]
+                            price = float(price_data.get("close", 0.0))
+
+                            if price > 0.0:
+                                # Use close price for both buy and sell (simplified)
+                                buy_prices[symbol] = price
+                                sell_prices[symbol] = price
+                                valid_symbols.append(symbol)
+                except Exception as e:
+                    print(f"ERROR: Failed to read replay state: {e}")
+
+            return buy_prices, sell_prices, valid_symbols
+
+        # Live mode: use Robinhood API
         for symbol in symbols:
             if symbol == "USDC-USD":
                 continue
@@ -750,6 +788,47 @@ class CryptoAPITrading:
         current_price = current_buy_prices[symbol]
         asset_quantity = amount_in_usd / current_price
 
+        # In replay mode, write order to sim_orders.jsonl and return mock fill
+        if REPLAY_MODE:
+            rounded_quantity = round(asset_quantity, 8)
+
+            order = {
+                "ts": time.time(),
+                "client_order_id": client_order_id,
+                "side": side,
+                "symbol": symbol,
+                "qty": rounded_quantity,
+                "order_type": order_type
+            }
+
+            # Write order to sim_orders.jsonl
+            os.makedirs("replay_data", exist_ok=True)
+            with open("replay_data/sim_orders.jsonl", "a") as f:
+                f.write(json.dumps(order) + "\n")
+
+            # Record trade for GUI history
+            self._record_trade(
+                side="buy",
+                symbol=symbol,
+                qty=float(rounded_quantity),
+                price=float(current_price),
+                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                tag=tag,
+                order_id=client_order_id,
+            )
+
+            # Return instant mock fill
+            return {
+                "id": client_order_id,
+                "state": "filled",
+                "side": side,
+                "symbol": symbol,
+                "executed_notional": amount_in_usd,
+                "cumulative_quantity": rounded_quantity
+            }
+
+        # Live mode: use Robinhood API
         max_retries = 5
         retries = 0
 
@@ -822,6 +901,46 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
+        # In replay mode, write order to sim_orders.jsonl and return mock fill
+        if REPLAY_MODE:
+            rounded_quantity = round(asset_quantity, 8)
+
+            order = {
+                "ts": time.time(),
+                "client_order_id": client_order_id,
+                "side": side,
+                "symbol": symbol,
+                "qty": rounded_quantity,
+                "order_type": order_type
+            }
+
+            # Write order to sim_orders.jsonl
+            os.makedirs("replay_data", exist_ok=True)
+            with open("replay_data/sim_orders.jsonl", "a") as f:
+                f.write(json.dumps(order) + "\n")
+
+            # Record trade for GUI history
+            self._record_trade(
+                side="sell",
+                symbol=symbol,
+                qty=float(rounded_quantity),
+                price=float(expected_price) if expected_price is not None else None,
+                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                tag=tag,
+                order_id=client_order_id,
+            )
+
+            # Return instant mock fill
+            return {
+                "id": client_order_id,
+                "state": "filled",
+                "side": side,
+                "symbol": symbol,
+                "cumulative_quantity": rounded_quantity
+            }
+
+        # Live mode: use Robinhood API
         body = {
             "client_order_id": client_order_id,
             "side": side,
@@ -833,7 +952,7 @@ class CryptoAPITrading:
         }
 
         path = "/api/v1/crypto/trading/orders/"
-   
+
         response = self.make_api_request("POST", path, json.dumps(body))
 
         if response and isinstance(response, dict) and "errors" not in response:
@@ -1427,5 +1546,33 @@ class CryptoAPITrading:
                 print(traceback.format_exc())
 
 if __name__ == "__main__":
+    # ====== REPLAY MODE SETUP ======
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--replay', action='store_true', help='Run in replay mode')
+    parser.add_argument('--replay-output-dir', default='backtest_results/latest', help='Output directory')
+    args = parser.parse_args()
+
+    # Update global variables
+    REPLAY_MODE = args.replay
+    REPLAY_OUTPUT_DIR = args.replay_output_dir
+
+    if REPLAY_MODE:
+        # Redirect hub_data writes to replay output directory
+        HUB_DATA_DIR = os.path.join(REPLAY_OUTPUT_DIR, "hub_data")
+        os.makedirs(HUB_DATA_DIR, exist_ok=True)
+
+        # Update all hub data paths to use replay output directory (module-level globals)
+        import sys
+        current_module = sys.modules[__name__]
+        current_module.HUB_DATA_DIR = HUB_DATA_DIR
+        current_module.TRADER_STATUS_PATH = os.path.join(HUB_DATA_DIR, "trader_status.json")
+        current_module.TRADE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "trade_history.jsonl")
+        current_module.PNL_LEDGER_PATH = os.path.join(HUB_DATA_DIR, "pnl_ledger.json")
+        current_module.ACCOUNT_VALUE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "account_value_history.jsonl")
+
+        print("=" * 60)
+        print(f"REPLAY MODE ACTIVE - Output to {HUB_DATA_DIR}")
+        print("=" * 60)
+
     trading_bot = CryptoAPITrading()
     trading_bot.run()

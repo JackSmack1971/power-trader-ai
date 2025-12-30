@@ -8,6 +8,9 @@ import os
 import json
 import time
 import argparse
+import subprocess
+import signal
+import sys
 from datetime import datetime
 from kucoin.client import Market
 
@@ -604,6 +607,513 @@ def process_order(order, current_candle, execution_engine, output_dir="replay_da
     return fill
 
 
+def advance_time_atomic(current_ts, price_data, sequence, output_dir="replay_data"):
+	"""
+	Atomically update replay state file with new timestamp and prices.
+	Orchestrator writes this to advance the timeline.
+
+	Args:
+		current_ts: Current replay timestamp (unix timestamp)
+		price_data: Dict mapping coin symbols to price info
+		            {coin: {"close": price, "high": h, "low": l, "volume": v}, ...}
+		sequence: Sequence number (monotonically increasing)
+		output_dir: Directory for replay IPC files
+
+	State File Schema:
+		{
+			"sequence": 12345,
+			"timestamp": 1704067200,
+			"prices": {
+				"BTC": {"close": 98765.43, "high": 99000.00, "low": 98500.00, "volume": 1234.56},
+				"ETH": {"close": 3421.12, "high": 3450.00, "low": 3400.00, "volume": 5678.90}
+			},
+			"status": "ready",
+			"orchestrator_pid": 12345
+		}
+	"""
+	os.makedirs(output_dir, exist_ok=True)
+
+	state = {
+		"sequence": sequence,
+		"timestamp": current_ts,
+		"prices": price_data,
+		"status": "ready",
+		"orchestrator_pid": os.getpid()
+	}
+
+	state_path = os.path.join(output_dir, "backtest_state.json")
+	_atomic_write_json(state_path, state)
+
+
+def read_state_atomic(output_dir="replay_data", last_sequence=None):
+	"""
+	Read current replay state atomically.
+	Subprocesses use this to get current timestamp and prices.
+
+	Args:
+		output_dir: Directory for replay IPC files
+		last_sequence: Last sequence number seen (to detect stale reads)
+
+	Returns:
+		dict: State data or None if file doesn't exist
+
+	Raises:
+		RuntimeError: If sequence number hasn't advanced (stale read)
+	"""
+	state_path = os.path.join(output_dir, "backtest_state.json")
+
+	if not os.path.exists(state_path):
+		return None
+
+	try:
+		with open(state_path, "r") as f:
+			state = json.load(f)
+	except Exception as e:
+		print(f"ERROR: Failed to read replay state: {e}")
+		return None
+
+	# Check for stale reads (sequence should be monotonically increasing)
+	if last_sequence is not None:
+		current_seq = state.get("sequence", 0)
+		if current_seq <= last_sequence:
+			raise RuntimeError(
+				f"Stale state read detected: current_seq={current_seq}, last_seq={last_sequence}"
+			)
+
+	return state
+
+
+def signal_component_ready(component_name, sequence, output_dir="replay_data"):
+	"""
+	Signal that a component (thinker/trader) is ready for the next tick.
+	Components write this after processing the current state.
+
+	Args:
+		component_name: Name of component ("thinker" or "trader")
+		sequence: Current sequence number being processed
+		output_dir: Directory for replay IPC files
+	"""
+	os.makedirs(output_dir, exist_ok=True)
+
+	ready_signal = {
+		"component": component_name,
+		"sequence": sequence,
+		"timestamp": time.time(),
+		"pid": os.getpid()
+	}
+
+	ready_path = os.path.join(output_dir, "component_ready.jsonl")
+
+	with open(ready_path, "a") as f:
+		f.write(json.dumps(ready_signal) + "\n")
+
+
+def wait_for_components(sequence_number, components=None, timeout=30.0, output_dir="replay_data"):
+	"""
+	Wait for all components to signal ready for the given sequence number.
+	Orchestrator uses this to ensure synchronization before advancing time.
+
+	Args:
+		sequence_number: Sequence number to wait for
+		components: List of component names to wait for (default: ["thinker", "trader"])
+		timeout: Maximum time to wait in seconds
+		output_dir: Directory for replay IPC files
+
+	Returns:
+		bool: True if all components ready, False if timeout
+
+	Raises:
+		TimeoutError: If components don't respond within timeout
+	"""
+	if components is None:
+		components = ["thinker", "trader"]
+
+	ready_path = os.path.join(output_dir, "component_ready.jsonl")
+
+	start_time = time.time()
+	components_ready = set()
+
+	while time.time() - start_time < timeout:
+		# Read all ready signals
+		if os.path.exists(ready_path):
+			try:
+				with open(ready_path, "r") as f:
+					lines = f.readlines()
+
+				# Find signals for current sequence
+				for line in lines:
+					try:
+						signal = json.loads(line.strip())
+						if signal.get("sequence") == sequence_number:
+							component = signal.get("component")
+							if component in components:
+								components_ready.add(component)
+					except Exception:
+						continue
+
+				# Check if all components are ready
+				if components_ready == set(components):
+					return True
+
+			except Exception as e:
+				print(f"WARNING: Failed to read component ready file: {e}")
+
+		# Brief sleep to avoid busy-waiting
+		time.sleep(0.01)
+
+	# Timeout
+	missing = set(components) - components_ready
+	raise TimeoutError(
+		f"Components {missing} did not respond for sequence {sequence_number} within {timeout}s"
+	)
+
+
+def clear_component_ready_log(output_dir="replay_data"):
+	"""
+	Clear the component ready log file.
+	Call this at the start of a backtest to remove stale signals.
+
+	Args:
+		output_dir: Directory for replay IPC files
+	"""
+	ready_path = os.path.join(output_dir, "component_ready.jsonl")
+
+	if os.path.exists(ready_path):
+		os.remove(ready_path)
+
+
+def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backtest_cache", output_dir="replay_data"):
+	"""
+	Iterate through historical timeline, updating IPC files.
+	This is the main replay orchestrator function.
+
+	Args:
+		start_ts: Unix timestamp start
+		end_ts: Unix timestamp end
+		coins: List of coin symbols (e.g., ['BTC', 'ETH'])
+		speed: Replay speed multiplier (1.0 = real-time, 10.0 = 10x faster)
+		cache_dir: Directory containing cached data
+		output_dir: Directory for replay IPC files
+
+	Process:
+		1. Load all cached candles for coins
+		2. Create unified timeline of all timestamps
+		3. For each timestamp:
+		   a. Update atomic state file with prices
+		   b. Wait for components to process
+		   c. Advance to next timestamp
+	"""
+	print("\n" + "=" * 60)
+	print("REPLAY TIME PROGRESSION")
+	print("=" * 60)
+	print(f"Start: {datetime.fromtimestamp(start_ts)}")
+	print(f"End: {datetime.fromtimestamp(end_ts)}")
+	print(f"Coins: {', '.join(coins)}")
+	print(f"Speed: {speed}x")
+	print("=" * 60)
+
+	# Load cache index
+	index = load_cache_index(cache_dir)
+
+	# Load all candles for all coins
+	coin_candles = {}
+	for coin in coins:
+		symbol = f"{coin}-USDT"
+		key = f"{symbol}_1hour"  # Use 1hour timeframe for replay
+
+		if key not in index:
+			print(f"ERROR: No cached data for {key}")
+			continue
+
+		# Find cache entry that covers the requested range
+		cache_file = None
+		for entry in index[key]:
+			if entry["start_ts"] <= start_ts and entry["end_ts"] >= end_ts:
+				cache_file = entry["file"]
+				break
+
+		if not cache_file:
+			# Try to find overlapping entries
+			for entry in index[key]:
+				if entry["end_ts"] >= start_ts and entry["start_ts"] <= end_ts:
+					cache_file = entry["file"]
+					break
+
+		if not cache_file:
+			print(f"ERROR: No cache file covers range for {key}")
+			continue
+
+		# Load candles
+		cache_path = os.path.join(cache_dir, cache_file)
+		try:
+			with open(cache_path, "r") as f:
+				candles = json.load(f)
+
+			# Filter to requested range
+			candles = [c for c in candles if start_ts <= c["time"] <= end_ts]
+			coin_candles[coin] = candles
+
+			print(f"  Loaded {len(candles)} candles for {coin}")
+		except Exception as e:
+			print(f"  ERROR loading candles for {coin}: {e}")
+			continue
+
+	if not coin_candles:
+		print("ERROR: No candle data loaded for any coin")
+		return
+
+	# Create unified timeline (all unique timestamps across all coins)
+	all_timestamps = set()
+	for coin, candles in coin_candles.items():
+		for candle in candles:
+			all_timestamps.add(candle["time"])
+
+	timeline = sorted(all_timestamps)
+
+	print(f"\nTimeline: {len(timeline)} unique timestamps")
+	print("=" * 60)
+
+	# Clear component ready log
+	clear_component_ready_log(output_dir)
+
+	# Iterate through timeline
+	sequence = 0
+	total_ticks = len(timeline)
+
+	for i, current_ts in enumerate(timeline):
+		sequence += 1
+
+		# Build price data for this timestamp
+		price_data = {}
+		for coin, candles in coin_candles.items():
+			# Find candle at or before current timestamp
+			relevant_candle = None
+			for candle in candles:
+				if candle["time"] <= current_ts:
+					relevant_candle = candle
+				else:
+					break  # Candles are sorted, so we can break here
+
+			if relevant_candle:
+				price_data[coin] = {
+					"close": relevant_candle["close"],
+					"high": relevant_candle["high"],
+					"low": relevant_candle["low"],
+					"volume": relevant_candle["volume"]
+				}
+
+		# Update atomic state file
+		advance_time_atomic(current_ts, price_data, sequence, output_dir)
+
+		# Progress tracking
+		progress_pct = ((i + 1) / total_ticks) * 100
+		elapsed_time = i * (3600 / speed) if i > 0 else 0  # Estimate based on 1hour candles
+
+		if (i + 1) % max(1, total_ticks // 100) == 0 or i == total_ticks - 1:
+			print(f"[{i + 1}/{total_ticks}] {progress_pct:.1f}% | "
+			      f"Time: {datetime.fromtimestamp(current_ts)} | "
+			      f"Seq: {sequence}")
+
+		# Wait briefly for components to process (or according to speed)
+		# In fast replay mode, we don't wait for real-time passage
+		if speed < 100:
+			# For slower replays, add a small delay
+			time.sleep(0.01 / speed)
+
+	print("\n" + "=" * 60)
+	print("REPLAY TIME PROGRESSION COMPLETE")
+	print("=" * 60)
+
+
+# Global subprocess references for signal handler
+_thinker_process = None
+_trader_process = None
+
+
+def _signal_handler(signum, frame):
+	"""Handle Ctrl+C for graceful shutdown of subprocesses."""
+	global _thinker_process, _trader_process
+
+	print("\n\n" + "=" * 60)
+	print("SHUTDOWN SIGNAL RECEIVED - Cleaning up...")
+	print("=" * 60)
+
+	if _thinker_process:
+		print("Terminating pt_thinker.py...")
+		_thinker_process.terminate()
+		try:
+			_thinker_process.wait(timeout=5.0)
+			print("  pt_thinker.py terminated cleanly")
+		except subprocess.TimeoutExpired:
+			print("  Force killing pt_thinker.py...")
+			_thinker_process.kill()
+
+	if _trader_process:
+		print("Terminating pt_trader.py...")
+		_trader_process.terminate()
+		try:
+			_trader_process.wait(timeout=5.0)
+			print("  pt_trader.py terminated cleanly")
+		except subprocess.TimeoutExpired:
+			print("  Force killing pt_trader.py...")
+			_trader_process.kill()
+
+	print("=" * 60)
+	print("SHUTDOWN COMPLETE")
+	print("=" * 60)
+
+	sys.exit(0)
+
+
+def run_backtest(start_date, end_date, coins, output_dir, speed=1.0, cache_dir="backtest_cache"):
+	"""
+	Launch pt_thinker.py and pt_trader.py in replay mode and run backtest.
+
+	Args:
+		start_date: Date string "YYYY-MM-DD"
+		end_date: Date string "YYYY-MM-DD"
+		coins: List of coin symbols
+		output_dir: Output directory for results
+		speed: Replay speed multiplier
+		cache_dir: Directory containing cached data
+	"""
+	global _thinker_process, _trader_process
+
+	# Install signal handler for Ctrl+C
+	signal.signal(signal.SIGINT, _signal_handler)
+
+	print("\n" + "=" * 60)
+	print("STARTING BACKTEST")
+	print("=" * 60)
+	print(f"Start Date: {start_date}")
+	print(f"End Date: {end_date}")
+	print(f"Coins: {', '.join(coins)}")
+	print(f"Output Directory: {output_dir}")
+	print(f"Speed: {speed}x")
+	print("=" * 60)
+
+	# Convert dates to timestamps
+	start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+	end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+	start_ts = int(start_dt.timestamp())
+	end_ts = int(end_dt.timestamp())
+
+	# Create output directory
+	os.makedirs(output_dir, exist_ok=True)
+	os.makedirs("replay_data", exist_ok=True)
+
+	# Launch pt_thinker.py in replay mode
+	print("\n[1/3] Launching pt_thinker.py in replay mode...")
+	thinker_cmd = [
+		sys.executable,
+		"pt_thinker.py",
+		"--replay",
+		"--replay-cache-dir", cache_dir
+	]
+
+	try:
+		_thinker_process = subprocess.Popen(
+			thinker_cmd,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			universal_newlines=True,
+			bufsize=1
+		)
+		print(f"  pt_thinker.py started (PID: {_thinker_process.pid})")
+	except Exception as e:
+		print(f"  ERROR: Failed to start pt_thinker.py: {e}")
+		return
+
+	# Brief delay to let thinker initialize
+	time.sleep(2.0)
+
+	# Launch pt_trader.py in replay mode
+	print("\n[2/3] Launching pt_trader.py in replay mode...")
+	trader_cmd = [
+		sys.executable,
+		"pt_trader.py",
+		"--replay",
+		"--replay-output-dir", output_dir
+	]
+
+	try:
+		_trader_process = subprocess.Popen(
+			trader_cmd,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			universal_newlines=True,
+			bufsize=1
+		)
+		print(f"  pt_trader.py started (PID: {_trader_process.pid})")
+	except Exception as e:
+		print(f"  ERROR: Failed to start pt_trader.py: {e}")
+		# Cleanup thinker
+		if _thinker_process:
+			_thinker_process.terminate()
+		return
+
+	# Brief delay to let trader initialize
+	time.sleep(2.0)
+
+	# Check if both processes are still running
+	if _thinker_process.poll() is not None:
+		print("  ERROR: pt_thinker.py exited prematurely")
+		# Read and print output
+		if _thinker_process.stdout:
+			output = _thinker_process.stdout.read()
+			print(f"  Output:\n{output}")
+		if _trader_process:
+			_trader_process.terminate()
+		return
+
+	if _trader_process.poll() is not None:
+		print("  ERROR: pt_trader.py exited prematurely")
+		# Read and print output
+		if _trader_process.stdout:
+			output = _trader_process.stdout.read()
+			print(f"  Output:\n{output}")
+		if _thinker_process:
+			_thinker_process.terminate()
+		return
+
+	print("  Both components running successfully")
+
+	# Run replay time progression
+	print("\n[3/3] Starting replay time progression...")
+	try:
+		replay_time_progression(start_ts, end_ts, coins, speed, cache_dir, "replay_data")
+	except Exception as e:
+		print(f"\nERROR during replay: {e}")
+		import traceback
+		traceback.print_exc()
+	finally:
+		# Cleanup subprocesses
+		print("\nCleaning up subprocesses...")
+
+		if _thinker_process:
+			_thinker_process.terminate()
+			try:
+				_thinker_process.wait(timeout=5.0)
+				print("  pt_thinker.py terminated cleanly")
+			except subprocess.TimeoutExpired:
+				_thinker_process.kill()
+				print("  pt_thinker.py force killed")
+
+		if _trader_process:
+			_trader_process.terminate()
+			try:
+				_trader_process.wait(timeout=5.0)
+				print("  pt_trader.py terminated cleanly")
+			except subprocess.TimeoutExpired:
+				_trader_process.kill()
+				print("  pt_trader.py force killed")
+
+	print("\n" + "=" * 60)
+	print("BACKTEST COMPLETE")
+	print("=" * 60)
+	print(f"Results saved to: {output_dir}")
+
+
 def run_tests():
     """Run internal tests for development."""
     import sys
@@ -780,16 +1290,25 @@ Examples:
 
   # Warm cache for multiple coins
   python pt_replay.py --warm-cache --start-date 2024-01-01 --end-date 2024-02-01 --coins BTC,ETH,DOGE
+
+  # Run backtest for one month
+  python pt_replay.py --backtest --start-date 2024-01-01 --end-date 2024-02-01 --coins BTC,ETH --speed 10.0
+
+  # Run backtest with custom output directory
+  python pt_replay.py --backtest --start-date 2024-01-01 --end-date 2024-02-01 --coins BTC --output-dir my_backtest
         """
     )
 
     parser.add_argument("--test", action="store_true", help="Run internal tests")
     parser.add_argument("--warm-cache", action="store_true", help="Pre-fetch and cache historical data")
+    parser.add_argument("--backtest", action="store_true", help="Run backtest simulation")
     parser.add_argument("--start-date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--coins", help="Comma-separated list of coins (e.g., BTC,ETH,DOGE)")
     parser.add_argument("--timeframes", help="Comma-separated list of timeframes (default: all)")
     parser.add_argument("--cache-dir", default="backtest_cache", help="Cache directory (default: backtest_cache)")
+    parser.add_argument("--output-dir", help="Output directory for backtest results (default: auto-generated)")
+    parser.add_argument("--speed", type=float, default=10.0, help="Replay speed multiplier (default: 10.0)")
 
     args = parser.parse_args()
 
@@ -806,6 +1325,42 @@ Examples:
             timeframes = [tf.strip() for tf in args.timeframes.split(",")]
 
         warm_cache(args.start_date, args.end_date, coins, timeframes, args.cache_dir)
+
+    elif args.backtest:
+        if not args.start_date or not args.end_date or not args.coins:
+            parser.error("--backtest requires --start-date, --end-date, and --coins")
+
+        coins = [c.strip() for c in args.coins.split(",")]
+
+        # Auto-generate output directory if not specified
+        if not args.output_dir:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            args.output_dir = f"backtest_results/backtest_{timestamp}"
+
+        # Create backtest config file
+        config = {
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "coins": coins,
+            "speed": args.speed,
+            "cache_dir": args.cache_dir,
+            "execution_model": {
+                "slippage_bps": 5,
+                "fee_bps": 20,
+                "max_volume_pct": 1.0,
+                "latency_ms": [50, 500],
+                "partial_fill_threshold": 0.01
+            }
+        }
+
+        os.makedirs(args.output_dir, exist_ok=True)
+        config_path = os.path.join(args.output_dir, "backtest_config.json")
+        _atomic_write_json(config_path, config)
+
+        print(f"\nBacktest config saved to: {config_path}")
+
+        # Run backtest
+        run_backtest(args.start_date, args.end_date, coins, args.output_dir, args.speed, args.cache_dir)
 
     else:
         parser.print_help()
