@@ -17,6 +17,7 @@ import psutil
 import logging
 import json
 import uuid
+import argparse
 
 from nacl.signing import SigningKey
 
@@ -430,6 +431,94 @@ for _sym in CURRENT_COINS:
 os.chdir(BASE_DIR)
 
 
+def _read_cached_kline_for_replay(coin, timeframe, current_ts, cache_dir="backtest_cache"):
+	"""
+	Read cached historical candles for replay mode.
+	Returns same format as KuCoin API for compatibility.
+
+	Args:
+		coin: Coin symbol (e.g., "BTC")
+		timeframe: Timeframe (e.g., "1hour")
+		current_ts: Current replay timestamp
+
+	Returns:
+		str: KuCoin-formatted candle data
+	"""
+	symbol = f"{coin}-USDT"
+
+	# Load cache index to find relevant cache file
+	index_path = os.path.join(cache_dir, "cache_index.json")
+
+	if not os.path.exists(index_path):
+		print(f"ERROR: Cache index not found at {index_path}")
+		return "[]"
+
+	try:
+		with open(index_path, "r") as f:
+			index = json.load(f)
+	except Exception as e:
+		print(f"ERROR: Failed to load cache index: {e}")
+		return "[]"
+
+	key = f"{symbol}_{timeframe}"
+
+	if key not in index:
+		print(f"ERROR: No cached data for {key}")
+		return "[]"
+
+	# Find cache entry that contains current_ts
+	cache_file = None
+	for entry in index[key]:
+		if entry["start_ts"] <= current_ts <= entry["end_ts"]:
+			cache_file = entry["file"]
+			break
+
+	if not cache_file:
+		print(f"ERROR: No cache entry contains timestamp {current_ts} for {key}")
+		return "[]"
+
+	# Load cache file
+	cache_path = os.path.join(cache_dir, cache_file)
+
+	if not os.path.exists(cache_path):
+		print(f"ERROR: Cache file not found at {cache_path}")
+		return "[]"
+
+	try:
+		with open(cache_path, "r") as f:
+			candles = json.load(f)
+	except Exception as e:
+		print(f"ERROR: Failed to load cache file: {e}")
+		return "[]"
+
+	# Filter candles up to current_ts and return last N candles (matching KuCoin behavior)
+	# KuCoin typically returns ~100-200 recent candles
+	relevant_candles = [c for c in candles if c["time"] <= current_ts]
+
+	if not relevant_candles:
+		print(f"WARNING: No candles found up to timestamp {current_ts}")
+		return "[]"
+
+	# Get last 200 candles (or fewer if not available)
+	recent_candles = relevant_candles[-200:]
+
+	# Convert to KuCoin format: [['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'], ...]
+	kucoin_format = []
+	for candle in recent_candles:
+		kucoin_format.append([
+			str(candle["time"]),
+			str(candle["open"]),
+			str(candle["close"]),
+			str(candle["high"]),
+			str(candle["low"]),
+			str(candle["volume"]),
+			"0"  # turnover (not used by pt_thinker)
+		])
+
+	# Return as string matching KuCoin API format
+	return str(kucoin_format)
+
+
 wallet_addr_list = []
 wallet_addr_users = []
 total_long = 0
@@ -553,7 +642,22 @@ def step_coin(sym: str):
 		history_list = []
 		while True:
 			try:
-				history = str(market.get_kline(coin, tf_choices[tf_choice_index])).replace(']]', '], ').replace('[[', '[')
+				# In replay mode, read from cache instead of KuCoin API
+				if REPLAY_MODE:
+					# Read current timestamp from replay state file
+					state_file = "replay_data/backtest_state.json"
+					if os.path.exists(state_file):
+						with open(state_file, "r") as f:
+							state = json.load(f)
+						current_ts = state.get("timestamp", 0)
+						history = _read_cached_kline_for_replay(coin, tf_choices[tf_choice_index], current_ts, REPLAY_CACHE_DIR)
+						history = history.replace(']]', '], ').replace('[[', '[')
+					else:
+						print(f"ERROR: Replay state file not found at {state_file}")
+						time.sleep(1.0)
+						continue
+				else:
+					history = str(market.get_kline(coin, tf_choices[tf_choice_index])).replace(']]', '], ').replace('[[', '[')
 				break
 			except Exception as e:
 				time.sleep(3.5)
@@ -1090,6 +1194,21 @@ def step_coin(sym: str):
 	states[sym] = st
 
 
+
+
+# ====== REPLAY MODE SETUP ======
+parser = argparse.ArgumentParser()
+parser.add_argument('--replay', action='store_true', help='Run in replay mode')
+parser.add_argument('--replay-cache-dir', default='backtest_cache', help='Cache directory')
+args = parser.parse_args()
+
+REPLAY_MODE = args.replay
+REPLAY_CACHE_DIR = args.replay_cache_dir
+
+if REPLAY_MODE:
+	print("=" * 60)
+	print("REPLAY MODE ACTIVE - Using cached historical data")
+	print("=" * 60)
 
 
 try:
