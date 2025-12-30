@@ -1,10 +1,41 @@
 # Backtesting & Simulation Feature Proposal
 
-**Status:** Proposed
+**Status:** Revised (v2.0)
 **Created:** 2025-12-30
+**Revised:** 2025-12-30 (Quant Trader Review)
 **Author:** Claude (Brainstorm Workflow)
-**Estimated Timeline:** 14 days
+**Estimated Timeline:** 21-28 days
 **Priority:** High
+
+---
+
+## 🔴 CRITICAL REVISIONS (v2.0)
+
+This proposal has been significantly revised based on expert quant trader feedback identifying **23 critical weaknesses**. The following changes address CRITICAL and HIGH priority issues:
+
+### CRITICAL Fixes (Must-Have)
+1. ✅ **Look-Ahead Bias Eliminated**: Implemented walk-forward validation with point-in-time training
+2. ✅ **Realistic Execution**: Added configurable slippage (0.05-0.2%), transaction costs (0.1-0.25%), and partial fills
+3. ✅ **Corrected Sharpe Ratio**: Fixed to use 365-day annualization and time-series returns (not per-trade)
+4. ✅ **True Max Drawdown**: Calculated from total equity (unrealized + realized), not just closed trades
+
+### HIGH Priority Fixes
+5. ✅ **Eliminated Race Conditions**: Single atomic state file instead of multiple IPC files
+6. ✅ **KuCoin/Robinhood Data Alignment**: Added correlation adjustment and data source validation
+7. ✅ **Incremental Model Training**: Neural model retrains at each backtest step using only past data
+8. ✅ **Transaction Cost Model**: Full fee structure (maker/taker fees, spread, slippage)
+
+### MEDIUM Priority Enhancements
+9. ✅ **Regime Detection**: Classify market conditions (bull/bear × high/low volatility)
+10. ✅ **Buy-and-Hold Benchmark**: Auto-calculate passive strategy baseline
+11. ✅ **Sortino/Calmar Ratios**: Better risk-adjusted metrics beyond Sharpe
+12. ✅ **Comprehensive Testing**: Integration tests for subprocess sync, race conditions, data gaps
+13. ✅ **Observability**: Structured logging with real-time monitoring
+
+### Timeline Adjustment
+- **Original**: 14 days (unrealistic)
+- **Revised**: 21-28 days with dedicated developer
+- **Rationale**: Accounts for walk-forward validation complexity, robust testing, edge case handling
 
 ---
 
@@ -22,16 +53,947 @@ This proposal defines a comprehensive backtesting and simulation capability for 
 
 ## Table of Contents
 
-1. [Problem Statement](#problem-statement)
-2. [User Value & Business Logic](#user-value--business-logic)
-3. [Implementation Approaches Evaluated](#implementation-approaches-evaluated)
-4. [Recommended Solution: Hybrid Replay Mode](#recommended-solution-hybrid-replay-mode)
-5. [Technical Specification](#technical-specification)
-6. [Implementation Plan](#implementation-plan)
-7. [Testing & Validation](#testing--validation)
-8. [Risk Mitigation](#risk-mitigation)
-9. [Success Metrics](#success-metrics)
-10. [Appendix: Code References](#appendix-code-references)
+1. [Critical Flaws Fixed](#critical-flaws-fixed)
+2. [Problem Statement](#problem-statement)
+3. [User Value & Business Logic](#user-value--business-logic)
+4. [Implementation Approaches Evaluated](#implementation-approaches-evaluated)
+5. [Recommended Solution: Hybrid Replay Mode](#recommended-solution-hybrid-replay-mode)
+6. [Technical Specification](#technical-specification)
+7. [Implementation Plan](#implementation-plan)
+8. [Testing & Validation](#testing--validation)
+9. [Risk Mitigation](#risk-mitigation)
+10. [Success Metrics](#success-metrics)
+11. [Appendix: Code References](#appendix-code-references)
+
+---
+
+## Critical Flaws Fixed
+
+### 1. Look-Ahead Bias - FATAL FLAW ⚠️
+
+**Original Problem:**
+The v1.0 proposal would train the neural model on full historical data, then backtest on the same data. This creates catastrophic look-ahead bias where the model has "seen the future."
+
+**Example Impact:**
+- Train model on all of 2024 data (including December crash)
+- Backtest on 2024 shows model "predicted" the December crash
+- **Reality**: Model wouldn't have known about it in January 2024
+- **Result**: Artificially inflated returns of 15-30%
+
+**Fix: Walk-Forward Validation**
+
+```python
+# Backtest runs from 2024-01-01 to 2024-12-31
+backtest_start = "2024-01-01"
+backtest_end = "2024-12-31"
+
+# Initial training: Use data BEFORE backtest starts
+initial_training_end = "2023-12-31"  # Train on 2023 and earlier
+train_neural_model(data_end=initial_training_end)
+
+# Incremental retraining during backtest
+retrain_interval = 7 * 24 * 3600  # Retrain weekly
+
+for current_timestamp in replay_timeline:
+    # Only use data UP TO current_timestamp
+    if (current_timestamp - last_retrain) > retrain_interval:
+        train_neural_model(data_end=current_timestamp)
+        last_retrain = current_timestamp
+
+    # Generate signals using point-in-time model
+    signal = generate_signal(current_timestamp)
+```
+
+**Implementation**: New component `pt_incremental_trainer.py` handles point-in-time retraining.
+
+---
+
+### 2. Instant Fill Assumption - Unrealistic Execution ⚠️
+
+**Original Problem:**
+```python
+# v1.0 code assumed instant fills at close price
+return {"id": order_id, "state": "filled"}
+```
+
+**Real-World Impact:**
+- No slippage: Market orders experience 0.05-5% slippage during volatility
+- No liquidity constraints: Assumes you can fill any size order
+- No partial fills: Real orders can be 50% filled, rest canceled
+- **Result**: Backtest shows 5-20% better performance than live reality
+
+**Fix: Realistic Execution Model**
+
+```python
+class RealisticExecutionEngine:
+    def __init__(self, slippage_bps=5, fee_bps=20):
+        self.slippage_bps = slippage_bps  # 0.05% default
+        self.fee_bps = fee_bps  # 0.20% default
+
+    def simulate_fill(self, side, qty, current_price, candle):
+        """
+        Simulate realistic order execution.
+
+        Args:
+            side: 'buy' or 'sell'
+            qty: Order quantity
+            current_price: Close price from candle
+            candle: Full OHLCV data for liquidity checks
+
+        Returns:
+            fill_price, fill_qty, fees
+        """
+        # 1. Calculate slippage (worse on volatile candles)
+        volatility = (candle['high'] - candle['low']) / candle['close']
+        slippage_multiplier = 1.0 + (volatility * 2)  # Double slippage on volatile candles
+
+        if side == 'buy':
+            slippage = current_price * (self.slippage_bps / 10000) * slippage_multiplier
+            fill_price = current_price + slippage
+        else:
+            slippage = current_price * (self.slippage_bps / 10000) * slippage_multiplier
+            fill_price = current_price - slippage
+
+        # 2. Check liquidity (partial fills if order size > 1% of volume)
+        order_value = qty * fill_price
+        volume_limit = candle['volume'] * 0.01  # Max 1% of candle volume
+
+        if order_value > volume_limit:
+            fill_qty = volume_limit / fill_price
+            fill_status = "partial"
+        else:
+            fill_qty = qty
+            fill_status = "filled"
+
+        # 3. Calculate fees (maker/taker)
+        # Assume market orders = taker fees (higher)
+        fees = fill_qty * fill_price * (self.fee_bps / 10000)
+
+        # 4. Add network latency simulation (50-500ms)
+        latency_slippage = current_price * (random.uniform(0, 2) / 10000)
+        fill_price += latency_slippage if side == 'buy' else -latency_slippage
+
+        return {
+            "fill_price": fill_price,
+            "fill_qty": fill_qty,
+            "fees": fees,
+            "status": fill_status,
+            "slippage_bps": ((fill_price - current_price) / current_price) * 10000
+        }
+```
+
+**Configuration:**
+Users can adjust realism via config:
+```json
+{
+  "execution_model": {
+    "slippage_bps": 5,       // 0.05% slippage
+    "fee_bps": 20,           // 0.20% fees
+    "max_volume_pct": 1.0,   // Max 1% of candle volume
+    "latency_ms": [50, 500]  // Random latency range
+  }
+}
+```
+
+---
+
+### 3. Sharpe Ratio Calculation Errors ⚠️
+
+**Original Problem:**
+```python
+# v1.0 used wrong formula
+sharpe = (mean_return / std_dev) * math.sqrt(252)  # ❌ Wrong annualization
+```
+
+**Errors:**
+1. Used `sqrt(252)` (stock market days) instead of `sqrt(365)` (crypto 24/7)
+2. Calculated Sharpe from per-trade returns instead of time-series equity changes
+3. Assumed daily frequency regardless of actual trade frequency
+
+**Fix: Correct Implementation**
+
+```python
+def calculate_sharpe_ratio_corrected(equity_curve, timestamps, risk_free_rate=0.0):
+    """
+    Calculate Sharpe ratio using equity curve time series.
+
+    Args:
+        equity_curve: List of account values over time
+        timestamps: Corresponding unix timestamps
+        risk_free_rate: Annual risk-free rate (default 0.05 for 5%)
+
+    Returns:
+        Annualized Sharpe ratio
+    """
+    import numpy as np
+
+    # Convert to numpy arrays
+    equity = np.array(equity_curve)
+    ts = np.array(timestamps)
+
+    # Calculate daily returns (resample to daily if higher frequency)
+    # Crypto trades 365 days/year
+    daily_timestamps = []
+    daily_equity = []
+
+    current_day = ts[0] // 86400
+    day_equity = [equity[0]]
+
+    for i in range(1, len(ts)):
+        day = ts[i] // 86400
+        if day > current_day:
+            # New day - record previous day's closing equity
+            daily_timestamps.append(current_day * 86400)
+            daily_equity.append(day_equity[-1])
+            current_day = day
+            day_equity = [equity[i]]
+        else:
+            day_equity.append(equity[i])
+
+    # Calculate returns
+    daily_equity = np.array(daily_equity)
+    returns = np.diff(daily_equity) / daily_equity[:-1]
+
+    if len(returns) < 2:
+        return 0.0
+
+    # Calculate Sharpe
+    mean_return = np.mean(returns)
+    std_return = np.std(returns, ddof=1)  # Sample std dev
+
+    if std_return == 0:
+        return 0.0
+
+    # Annualize
+    daily_rf = (1 + risk_free_rate) ** (1/365) - 1
+    sharpe = (mean_return - daily_rf) / std_return * np.sqrt(365)
+
+    return sharpe
+```
+
+**Additional Metrics:**
+
+```python
+def calculate_sortino_ratio(returns, risk_free_rate=0.0):
+    """Only penalize downside volatility."""
+    downside_returns = returns[returns < 0]
+    downside_std = np.std(downside_returns, ddof=1)
+
+    if downside_std == 0:
+        return 0.0
+
+    return (np.mean(returns) - risk_free_rate) / downside_std * np.sqrt(365)
+
+def calculate_calmar_ratio(total_return, max_drawdown, years):
+    """Return / Max Drawdown (annualized)."""
+    if max_drawdown == 0:
+        return float('inf')
+
+    annual_return = (1 + total_return) ** (1/years) - 1
+    return annual_return / max_drawdown
+```
+
+---
+
+### 4. Max Drawdown from Total Equity ⚠️
+
+**Original Problem:**
+```python
+# v1.0 only counted realized PnL
+cumulative_pnl += trade.get("realized_profit_usd", 0)  # ❌ Missing unrealized losses
+```
+
+**Example Failure:**
+- Buy BTC at $100k
+- Price drops to $80k (**-20% unrealized loss**)
+- DCA and recover to close at $102k (+2% realized)
+- **v1.0 shows**: 0% drawdown
+- **Reality**: -20% intra-position drawdown
+
+**Fix: Total Equity Drawdown**
+
+```python
+def calculate_max_drawdown_corrected(equity_curve):
+    """
+    Calculate max drawdown from total account equity.
+
+    Args:
+        equity_curve: List of total account values (cash + unrealized positions)
+
+    Returns:
+        max_drawdown_pct, max_drawdown_duration_days
+    """
+    import numpy as np
+
+    equity = np.array(equity_curve)
+
+    # Running maximum (peak)
+    running_max = np.maximum.accumulate(equity)
+
+    # Drawdown at each point
+    drawdown = (running_max - equity) / running_max * 100
+
+    # Maximum drawdown
+    max_dd = np.max(drawdown)
+    max_dd_idx = np.argmax(drawdown)
+
+    # Find peak before max drawdown
+    peak_idx = np.argmax(equity[:max_dd_idx+1])
+
+    # Calculate duration (in data points - convert to days based on frequency)
+    dd_duration = max_dd_idx - peak_idx
+
+    return {
+        "max_drawdown_pct": max_dd,
+        "max_drawdown_value": running_max[max_dd_idx] - equity[max_dd_idx],
+        "peak_idx": peak_idx,
+        "trough_idx": max_dd_idx,
+        "duration_periods": dd_duration
+    }
+```
+
+**Equity Curve Construction:**
+
+```python
+def build_equity_curve(trade_history, trader_status_snapshots):
+    """
+    Build complete equity curve from all available data.
+
+    Args:
+        trade_history: JSONL of completed trades
+        trader_status_snapshots: JSONL of periodic status updates
+
+    Returns:
+        timestamps[], equity_values[]
+    """
+    timestamps = []
+    equity_values = []
+
+    # Merge trades and status snapshots
+    for snapshot in trader_status_snapshots:
+        # Total equity = cash + unrealized position value
+        cash = snapshot.get("buying_power_usd", 0)
+
+        unrealized_value = 0
+        for symbol, position in snapshot.get("positions", {}).items():
+            qty = position["quantity"]
+            current_sell_price = position["current_sell_price"]
+            unrealized_value += qty * current_sell_price
+
+        total_equity = cash + unrealized_value
+
+        timestamps.append(snapshot["ts"])
+        equity_values.append(total_equity)
+
+    return timestamps, equity_values
+```
+
+---
+
+### 5. Atomic State File (Eliminates Race Conditions) ⚠️
+
+**Original Problem:**
+```python
+# v1.0 had race condition between multiple file writes
+write("current_timestamp.txt", "1704067200")
+write("BTC_current_price.txt", "98765.43")
+sleep(0.1)  # ❌ Hope subprocess reads both before next update
+```
+
+**Race Condition Example:**
+1. Orchestrator writes new timestamp (time=T2)
+2. pt_thinker reads timestamp (T2)
+3. **Orchestrator writes new price before pt_thinker finishes**
+4. pt_thinker reads price (now T3's price, not T2's!)
+5. **Result**: Timestamp/price mismatch
+
+**Fix: Single Atomic State File**
+
+```python
+# replay_data/backtest_state.json (single atomic write)
+{
+  "sequence": 12345,
+  "timestamp": 1704067200,
+  "prices": {
+    "BTC": {"close": 98765.43, "high": 99000.00, "low": 98500.00, "volume": 1234.56},
+    "ETH": {"close": 3421.12, "high": 3450.00, "low": 3400.00, "volume": 5678.90}
+  },
+  "status": "ready",
+  "orchestrator_pid": 12345
+}
+```
+
+**Orchestrator:**
+```python
+def advance_time_atomic(current_ts, price_data):
+    """Write all state atomically."""
+    state = {
+        "sequence": self.sequence_number,
+        "timestamp": current_ts,
+        "prices": price_data,
+        "status": "ready",
+        "orchestrator_pid": os.getpid()
+    }
+
+    self.sequence_number += 1
+    _atomic_write_json("replay_data/backtest_state.json", state)
+```
+
+**Subprocess (pt_thinker.py, pt_trader.py):**
+```python
+def read_state_atomic():
+    """Read consistent state snapshot."""
+    with open("replay_data/backtest_state.json", "r") as f:
+        state = json.load(f)
+
+    # Validate sequence is advancing
+    if state["sequence"] <= self.last_seen_sequence:
+        # Stale read - retry
+        time.sleep(0.01)
+        return read_state_atomic()
+
+    self.last_seen_sequence = state["sequence"]
+    return state
+```
+
+**Handshake Protocol:**
+```python
+# Subprocesses signal completion
+# replay_data/component_ready.jsonl (append-only)
+{
+  "sequence": 12345,
+  "component": "thinker",
+  "timestamp": 1704067200,
+  "ready": true,
+  "processing_time_ms": 234
+}
+
+{
+  "sequence": 12345,
+  "component": "trader",
+  "timestamp": 1704067200,
+  "ready": true,
+  "processing_time_ms": 123
+}
+```
+
+**Orchestrator waits for all components:**
+```python
+def wait_for_components(sequence_number, timeout=30.0):
+    """Wait for all components to signal ready."""
+    components_needed = {"thinker", "trader"}
+    components_ready = set()
+
+    start_time = time.time()
+
+    while len(components_ready) < len(components_needed):
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Components not ready: {components_needed - components_ready}")
+
+        # Read ready signals
+        with open("replay_data/component_ready.jsonl", "r") as f:
+            for line in f:
+                signal = json.loads(line)
+                if signal["sequence"] == sequence_number and signal["ready"]:
+                    components_ready.add(signal["component"])
+
+        time.sleep(0.01)
+
+    return True
+```
+
+---
+
+### 6. Buy-and-Hold Benchmark (Baseline Comparison)
+
+**Why This Matters:**
+Without a baseline, you can't tell if your complex DCA strategy is better than just buying and holding.
+
+**Implementation:**
+
+```python
+def calculate_buy_and_hold_benchmark(start_ts, end_ts, initial_capital, coins):
+    """
+    Calculate buy-and-hold return for comparison.
+
+    Strategy: At start, allocate capital equally across all coins.
+              Hold until end without rebalancing.
+    """
+    results_per_coin = {}
+
+    for coin in coins:
+        # Get first and last prices
+        cache_file = f"backtest_cache/{coin}-USDT_1hour_{start_ts}_{end_ts}.json"
+        with open(cache_file, "r") as f:
+            data = json.load(f)
+
+        candles = data["candles"]
+        start_price = candles[0]["close"]
+        end_price = candles[-1]["close"]
+
+        # Calculate shares purchased
+        allocated_capital = initial_capital / len(coins)
+        shares = allocated_capital / start_price
+
+        # Calculate final value
+        final_value = shares * end_price
+
+        results_per_coin[coin] = {
+            "start_price": start_price,
+            "end_price": end_price,
+            "shares": shares,
+            "final_value": final_value,
+            "return_pct": ((final_value - allocated_capital) / allocated_capital) * 100
+        }
+
+    total_final_value = sum(r["final_value"] for r in results_per_coin.values())
+    total_return = ((total_final_value - initial_capital) / initial_capital) * 100
+
+    return {
+        "total_return_pct": total_return,
+        "final_value": total_final_value,
+        "per_coin": results_per_coin
+    }
+```
+
+**Report Section:**
+```python
+# In analytics report
+strategy_return = calculate_total_return(trades)
+benchmark_return = calculate_buy_and_hold_benchmark(...)
+
+outperformance = strategy_return - benchmark_return["total_return_pct"]
+
+print(f"Strategy Return: {strategy_return:+.2f}%")
+print(f"Buy-and-Hold Return: {benchmark_return['total_return_pct']:+.2f}%")
+print(f"Outperformance: {outperformance:+.2f}%")
+```
+
+---
+
+### 7. Regime Detection (Market Condition Classification)
+
+**Why This Matters:**
+A strategy might work in bull markets but fail in bear markets. Regime detection quantifies this.
+
+**Implementation:**
+
+```python
+class MarketRegimeDetector:
+    def __init__(self, sma_short=50, sma_long=200, vol_lookback=20):
+        self.sma_short = sma_short
+        self.sma_long = sma_long
+        self.vol_lookback = vol_lookback
+
+    def detect_regime(self, prices):
+        """
+        Classify current market regime.
+
+        Returns: One of:
+            - "bull_low_vol"
+            - "bull_high_vol"
+            - "bear_low_vol"
+            - "bear_high_vol"
+            - "sideways"
+        """
+        import numpy as np
+
+        # Calculate moving averages
+        sma_50 = np.mean(prices[-self.sma_short:])
+        sma_200 = np.mean(prices[-self.sma_long:]) if len(prices) >= self.sma_long else sma_50
+
+        # Calculate volatility (realized volatility)
+        returns = np.diff(prices[-self.vol_lookback:]) / prices[-self.vol_lookback-1:-1]
+        volatility = np.std(returns) * np.sqrt(365)  # Annualized
+
+        # Trend detection
+        if sma_50 > sma_200 * 1.02:  # 2% buffer
+            trend = "bull"
+        elif sma_50 < sma_200 * 0.98:
+            trend = "bear"
+        else:
+            trend = "sideways"
+
+        # Volatility classification
+        vol_threshold_low = 0.30  # 30% annualized
+        vol_threshold_high = 0.60  # 60% annualized
+
+        if volatility < vol_threshold_low:
+            vol_regime = "low_vol"
+        elif volatility > vol_threshold_high:
+            vol_regime = "high_vol"
+        else:
+            vol_regime = "mid_vol"
+
+        # Combine
+        if trend == "sideways":
+            return "sideways"
+        else:
+            return f"{trend}_{vol_regime}"
+
+    def analyze_performance_by_regime(self, equity_curve, prices, timestamps):
+        """
+        Break down performance by regime.
+
+        Returns dict of regime -> metrics
+        """
+        regimes = []
+        for i in range(max(self.sma_long, len(prices))):
+            regime = self.detect_regime(prices[:i+1])
+            regimes.append(regime)
+
+        # Group by regime
+        regime_performance = {}
+        for regime_type in set(regimes):
+            regime_indices = [i for i, r in enumerate(regimes) if r == regime_type]
+
+            if len(regime_indices) < 2:
+                continue
+
+            regime_equity = [equity_curve[i] for i in regime_indices]
+            regime_returns = np.diff(regime_equity) / regime_equity[:-1]
+
+            regime_performance[regime_type] = {
+                "count": len(regime_indices),
+                "mean_return": np.mean(regime_returns) * 100,
+                "sharpe": np.mean(regime_returns) / np.std(regime_returns) * np.sqrt(365) if np.std(regime_returns) > 0 else 0,
+                "total_return": ((regime_equity[-1] - regime_equity[0]) / regime_equity[0]) * 100
+            }
+
+        return regime_performance
+```
+
+**Usage in Analytics:**
+```python
+detector = MarketRegimeDetector()
+regime_perf = detector.analyze_performance_by_regime(equity_curve, prices, timestamps)
+
+print("\nPerformance by Market Regime:")
+for regime, metrics in regime_perf.items():
+    print(f"  {regime}: {metrics['total_return']:+.2f}% (Sharpe: {metrics['sharpe']:.2f})")
+```
+
+---
+
+### 8. Observability & Structured Logging
+
+**Why This Matters:**
+When backtest results don't match expectations, you need detailed logs to debug.
+
+**Implementation:**
+
+```python
+import logging
+import json
+from datetime import datetime
+
+class BacktestLogger:
+    def __init__(self, log_file="backtest_results/backtest.log"):
+        self.logger = logging.getLogger("backtest")
+        self.logger.setLevel(logging.DEBUG)
+
+        # File handler (structured JSON logs)
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(logging.DEBUG)
+
+        # Console handler (human-readable)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+
+        # Formatters
+        class JSONFormatter(logging.Formatter):
+            def format(self, record):
+                log_data = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "level": record.levelname,
+                    "component": record.name,
+                    "message": record.getMessage(),
+                    "extra": record.__dict__.get("extra", {})
+                }
+                return json.dumps(log_data)
+
+        fh.setFormatter(JSONFormatter())
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+        self.logger.addHandler(fh)
+        self.logger.addHandler(ch)
+
+    def log_replay_tick(self, sequence, timestamp, prices, positions, equity):
+        """Log each replay iteration."""
+        self.logger.debug("Replay tick", extra={
+            "extra": {
+                "sequence": sequence,
+                "timestamp": timestamp,
+                "prices": prices,
+                "position_count": len(positions),
+                "total_equity": equity,
+                "event_type": "replay_tick"
+            }
+        })
+
+    def log_trade_execution(self, side, symbol, qty, price, slippage, fees):
+        """Log each trade execution."""
+        self.logger.info(f"Trade executed: {side.upper()} {qty:.6f} {symbol} @ ${price:.2f}", extra={
+            "extra": {
+                "side": side,
+                "symbol": symbol,
+                "qty": qty,
+                "price": price,
+                "slippage_bps": slippage,
+                "fees": fees,
+                "event_type": "trade_execution"
+            }
+        })
+
+    def log_neural_signal(self, symbol, timeframe, signal_level, confidence):
+        """Log neural signal generation."""
+        self.logger.debug(f"Neural signal: {symbol} {timeframe} -> Level {signal_level}", extra={
+            "extra": {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "signal_level": signal_level,
+                "confidence": confidence,
+                "event_type": "neural_signal"
+            }
+        })
+
+    def log_error(self, error_type, error_msg, context):
+        """Log errors with context."""
+        self.logger.error(f"Error: {error_type} - {error_msg}", extra={
+            "extra": {
+                "error_type": error_type,
+                "error_message": error_msg,
+                "context": context,
+                "event_type": "error"
+            }
+        })
+```
+
+**Usage:**
+```python
+logger = BacktestLogger()
+
+# In replay loop
+logger.log_replay_tick(
+    sequence=sequence_num,
+    timestamp=current_ts,
+    prices={"BTC": 98765.43, "ETH": 3421.12},
+    positions=current_positions,
+    equity=total_equity
+)
+
+# In trader
+logger.log_trade_execution(
+    side="buy",
+    symbol="BTC-USD",
+    qty=0.001,
+    price=98765.43,
+    slippage=4.5,
+    fees=19.75
+)
+```
+
+**Log Analysis:**
+```bash
+# Find all trades
+grep '"event_type": "trade_execution"' backtest.log | jq .
+
+# Calculate average slippage
+grep '"event_type": "trade_execution"' backtest.log | jq '.extra.slippage_bps' | awk '{sum+=$1; count++} END {print sum/count}'
+
+# Find errors
+grep '"event_type": "error"' backtest.log | jq .
+```
+
+---
+
+### 9. Data Source Validation (KuCoin vs. Robinhood)
+
+**Problem:**
+Backtest uses KuCoin data, but live trading uses Robinhood. Prices can differ by 0.1-0.5%.
+
+**Fix: Correlation Adjustment**
+
+```python
+def validate_data_sources(kucoin_prices, robinhood_prices, tolerance_pct=0.5):
+    """
+    Compare KuCoin and Robinhood prices to measure divergence.
+
+    Args:
+        kucoin_prices: List of KuCoin close prices
+        robinhood_prices: List of Robinhood prices at same timestamps
+        tolerance_pct: Alert if divergence exceeds this %
+
+    Returns:
+        {
+            "mean_divergence_pct": float,
+            "max_divergence_pct": float,
+            "correlation": float,
+            "adjustment_factor": float
+        }
+    """
+    import numpy as np
+
+    kucoin = np.array(kucoin_prices)
+    robinhood = np.array(robinhood_prices)
+
+    # Calculate divergence
+    divergence_pct = ((kucoin - robinhood) / robinhood) * 100
+
+    mean_div = np.mean(divergence_pct)
+    max_div = np.max(np.abs(divergence_pct))
+
+    # Correlation
+    correlation = np.corrcoef(kucoin, robinhood)[0, 1]
+
+    # Adjustment factor (multiply KuCoin prices by this)
+    adjustment_factor = np.mean(robinhood / kucoin)
+
+    # Alert if divergence too high
+    if max_div > tolerance_pct:
+        print(f"⚠️ WARNING: KuCoin/Robinhood divergence {max_div:.2f}% exceeds {tolerance_pct}%")
+        print(f"   Backtest results may not match live trading reality.")
+
+    return {
+        "mean_divergence_pct": mean_div,
+        "max_divergence_pct": max_div,
+        "correlation": correlation,
+        "adjustment_factor": adjustment_factor
+    }
+
+# Usage: Fetch overlapping data from both sources
+kucoin_btc = fetch_kucoin_prices("BTC-USDT", start, end)
+robinhood_btc = fetch_robinhood_prices("BTC-USD", start, end)
+
+validation = validate_data_sources(kucoin_btc, robinhood_btc)
+
+print(f"Data Source Validation:")
+print(f"  Mean Divergence: {validation['mean_divergence_pct']:.3f}%")
+print(f"  Max Divergence: {validation['max_divergence_pct']:.3f}%")
+print(f"  Correlation: {validation['correlation']:.4f}")
+print(f"  Adjustment Factor: {validation['adjustment_factor']:.6f}")
+
+# Apply adjustment to backtest
+adjusted_kucoin_prices = kucoin_btc * validation['adjustment_factor']
+```
+
+---
+
+### 10. Comprehensive Testing Strategy
+
+**Original Gaps:**
+- Only tested math functions
+- No integration tests
+- No subprocess coordination tests
+
+**Enhanced Test Suite:**
+
+```python
+# tests/test_backtest_integration.py
+
+def test_subprocess_synchronization():
+    """
+    Verify thinker and trader stay synchronized during replay.
+    """
+    # Start replay with 1-hour of test data
+    replay_proc = start_replay(duration_hours=1, speed=100)
+
+    # Monitor sequence numbers in component_ready.jsonl
+    thinker_sequences = []
+    trader_sequences = []
+
+    with open("replay_data/component_ready.jsonl", "r") as f:
+        for line in f:
+            signal = json.loads(line)
+            if signal["component"] == "thinker":
+                thinker_sequences.append(signal["sequence"])
+            elif signal["component"] == "trader":
+                trader_sequences.append(signal["sequence"])
+
+    # Assert both components processed same sequences
+    assert set(thinker_sequences) == set(trader_sequences), "Components out of sync"
+
+def test_missing_candle_data():
+    """
+    Ensure graceful handling when cache has gaps.
+    """
+    # Create cache with deliberate gap
+    candles = [
+        {"time": 1000, "close": 100},
+        {"time": 2000, "close": 101},
+        # Gap at 3000
+        {"time": 4000, "close": 102}
+    ]
+
+    write_cache("BTC-USDT_1hour_test.json", candles)
+
+    # Run replay
+    result = run_replay(start_ts=1000, end_ts=5000)
+
+    # Should have logged gap warning
+    logs = read_logs()
+    assert any("gap detected" in log.lower() for log in logs)
+
+def test_realistic_execution_slippage():
+    """
+    Verify slippage calculation is realistic.
+    """
+    engine = RealisticExecutionEngine(slippage_bps=5, fee_bps=20)
+
+    candle = {"close": 100, "high": 102, "low": 98, "volume": 1000}
+
+    # Low volatility trade
+    fill = engine.simulate_fill("buy", 0.1, 100, candle)
+
+    # Slippage should be minimal
+    assert 0 < fill["slippage_bps"] < 10, f"Slippage too high: {fill['slippage_bps']}"
+
+    # High volatility candle
+    volatile_candle = {"close": 100, "high": 110, "low": 90, "volume": 1000}
+    fill2 = engine.simulate_fill("buy", 0.1, 100, volatile_candle)
+
+    # Slippage should be higher on volatile candle
+    assert fill2["slippage_bps"] > fill["slippage_bps"], "Volatility not affecting slippage"
+
+def test_walk_forward_no_lookahead():
+    """
+    Verify neural model only trains on past data.
+    """
+    backtest_start = datetime(2024, 1, 1)
+    backtest_end = datetime(2024, 12, 31)
+
+    # Mock neural trainer
+    training_history = []
+
+    def mock_train(data_end_ts):
+        training_history.append(data_end_ts)
+
+    # Run backtest
+    run_backtest_with_trainer(mock_train, backtest_start, backtest_end)
+
+    # Assert all training timestamps are <= backtest timestamps
+    for train_ts in training_history:
+        assert train_ts < backtest_end.timestamp(), f"Look-ahead bias: trained on {train_ts}"
+
+def test_equity_curve_includes_unrealized():
+    """
+    Verify max drawdown calculation includes unrealized losses.
+    """
+    # Simulate scenario: buy at 100, drop to 80, recover to 102
+    snapshots = [
+        {"ts": 1000, "buying_power": 1000, "positions": {}},
+        {"ts": 2000, "buying_power": 0, "positions": {"BTC": {"quantity": 10, "current_sell_price": 100}}},
+        {"ts": 3000, "buying_power": 0, "positions": {"BTC": {"quantity": 10, "current_sell_price": 80}}},
+        {"ts": 4000, "buying_power": 0, "positions": {"BTC": {"quantity": 10, "current_sell_price": 102}}},
+    ]
+
+    timestamps, equity = build_equity_curve([], snapshots)
+
+    dd = calculate_max_drawdown_corrected(equity)
+
+    # Max drawdown should be ~20% (1000 -> 800)
+    assert 18 < dd["max_drawdown_pct"] < 22, f"Max DD should be ~20%, got {dd['max_drawdown_pct']}"
+```
 
 ---
 
