@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PowerTrader AI specific
+r_key.txt
+r_secret.txt
+gui_settings.json
+hub_data/
+replay_data/
+BTC/
+ETH/
+XRP/
+BNB/
+DOGE/
+*_current_price.txt
+*.jsonl
+*.tmp
+
+# Backtest outputs
+backtest_results/
+*.html
