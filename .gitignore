@@ -1,0 +1,28 @@
+# Backtesting cache and results
+backtest_cache/
+backtest_results/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+r_key.txt
+r_secret.txt
+
+# Settings
+gui_settings.json
