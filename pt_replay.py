@@ -782,7 +782,80 @@ def clear_component_ready_log(output_dir="replay_data"):
 		os.remove(ready_path)
 
 
-def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backtest_cache", output_dir="replay_data"):
+def _run_incremental_training(coins, train_until_ts, output_dir):
+	"""
+	Run incremental training for all coins up to the specified timestamp.
+	This prevents look-ahead bias in backtesting.
+
+	Args:
+		coins: List of coin symbols
+		train_until_ts: Unix timestamp - train only on data before this time
+		output_dir: Directory to save trained models
+
+	Returns:
+		bool: True if training succeeded, False otherwise
+	"""
+	print("\n" + "=" * 60)
+	print("INCREMENTAL TRAINING - Walk-Forward Validation")
+	print("=" * 60)
+	print(f"Training up to: {datetime.fromtimestamp(train_until_ts)}")
+	print(f"Coins: {', '.join(coins)}")
+	print("=" * 60)
+
+	training_success = True
+
+	for coin in coins:
+		print(f"\nTraining {coin}...")
+
+		# Determine model output directory
+		if coin == "BTC":
+			model_dir = output_dir  # BTC uses root directory
+		else:
+			model_dir = os.path.join(coin)  # Altcoins use coin-specific folders
+			os.makedirs(model_dir, exist_ok=True)
+
+		# Launch pt_incremental_trainer.py
+		trainer_cmd = [
+			sys.executable,
+			"pt_incremental_trainer.py",
+			coin,
+			"--train-until", str(train_until_ts),
+			"--output-dir", model_dir
+		]
+
+		try:
+			result = subprocess.run(
+				trainer_cmd,
+				stdout=subprocess.PIPE,
+				stderr=subprocess.STDOUT,
+				universal_newlines=True,
+				timeout=1800  # 30 minute timeout
+			)
+
+			if result.returncode == 0:
+				print(f"  ✓ {coin} training completed successfully")
+			else:
+				print(f"  ✗ {coin} training failed with code {result.returncode}")
+				print(f"  Output: {result.stdout[-500:]}")  # Show last 500 chars
+				training_success = False
+		except subprocess.TimeoutExpired:
+			print(f"  ✗ {coin} training timed out after 30 minutes")
+			training_success = False
+		except Exception as e:
+			print(f"  ✗ {coin} training failed: {e}")
+			training_success = False
+
+	print("\n" + "=" * 60)
+	if training_success:
+		print("INCREMENTAL TRAINING COMPLETE")
+	else:
+		print("INCREMENTAL TRAINING COMPLETED WITH ERRORS")
+	print("=" * 60)
+
+	return training_success
+
+
+def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backtest_cache", output_dir="replay_data", enable_walk_forward=True, retrain_interval_days=7):
 	"""
 	Iterate through historical timeline, updating IPC files.
 	This is the main replay orchestrator function.
@@ -794,14 +867,17 @@ def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backt
 		speed: Replay speed multiplier (1.0 = real-time, 10.0 = 10x faster)
 		cache_dir: Directory containing cached data
 		output_dir: Directory for replay IPC files
+		enable_walk_forward: Enable walk-forward validation (incremental retraining)
+		retrain_interval_days: Days between model retraining (default: 7)
 
 	Process:
 		1. Load all cached candles for coins
 		2. Create unified timeline of all timestamps
 		3. For each timestamp:
-		   a. Update atomic state file with prices
-		   b. Wait for components to process
-		   c. Advance to next timestamp
+		   a. Check if retraining needed (walk-forward validation)
+		   b. Update atomic state file with prices
+		   c. Wait for components to process
+		   d. Advance to next timestamp
 	"""
 	print("\n" + "=" * 60)
 	print("REPLAY TIME PROGRESSION")
@@ -810,7 +886,14 @@ def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backt
 	print(f"End: {datetime.fromtimestamp(end_ts)}")
 	print(f"Coins: {', '.join(coins)}")
 	print(f"Speed: {speed}x")
+	print(f"Walk-Forward Validation: {'Enabled' if enable_walk_forward else 'Disabled'}")
+	if enable_walk_forward:
+		print(f"Retrain Interval: {retrain_interval_days} days")
 	print("=" * 60)
+
+	# Walk-forward training tracking
+	last_training_ts = start_ts  # Initialize to start time
+	retrain_interval_seconds = retrain_interval_days * 24 * 3600
 
 	# Load cache index
 	index = load_cache_index(cache_dir)
@@ -882,6 +965,27 @@ def replay_time_progression(start_ts, end_ts, coins, speed=1.0, cache_dir="backt
 
 	for i, current_ts in enumerate(timeline):
 		sequence += 1
+
+		# Check if incremental retraining is needed (walk-forward validation)
+		if enable_walk_forward and (current_ts - last_training_ts) >= retrain_interval_seconds:
+			print(f"\n{'='*60}")
+			print(f"WALK-FORWARD RETRAINING TRIGGERED")
+			print(f"Last training: {datetime.fromtimestamp(last_training_ts)}")
+			print(f"Current time: {datetime.fromtimestamp(current_ts)}")
+			print(f"Days elapsed: {(current_ts - last_training_ts) / 86400:.1f}")
+			print(f"{'='*60}")
+
+			# Run incremental training up to current timestamp
+			# This ensures the model only uses data available up to this point
+			training_success = _run_incremental_training(coins, current_ts, output_dir)
+
+			if training_success:
+				last_training_ts = current_ts
+				print(f"✓ Walk-forward training completed. Next training in {retrain_interval_days} days.")
+			else:
+				print(f"⚠ Walk-forward training had errors. Continuing backtest...")
+				# Still update last_training_ts to avoid repeated failures
+				last_training_ts = current_ts
 
 		# Build price data for this timestamp
 		price_data = {}
@@ -1081,7 +1185,11 @@ def run_backtest(start_date, end_date, coins, output_dir, speed=1.0, cache_dir="
 	# Run replay time progression
 	print("\n[3/3] Starting replay time progression...")
 	try:
-		replay_time_progression(start_ts, end_ts, coins, speed, cache_dir, "replay_data")
+		# Pass enable_walk_forward from run_backtest parameters
+		enable_wf = getattr(run_backtest, '_enable_walk_forward', True)
+		retrain_days = getattr(run_backtest, '_retrain_interval_days', 7)
+		replay_time_progression(start_ts, end_ts, coins, speed, cache_dir, "replay_data",
+		                        enable_walk_forward=enable_wf, retrain_interval_days=retrain_days)
 	except Exception as e:
 		print(f"\nERROR during replay: {e}")
 		import traceback
@@ -1309,6 +1417,8 @@ Examples:
     parser.add_argument("--cache-dir", default="backtest_cache", help="Cache directory (default: backtest_cache)")
     parser.add_argument("--output-dir", help="Output directory for backtest results (default: auto-generated)")
     parser.add_argument("--speed", type=float, default=10.0, help="Replay speed multiplier (default: 10.0)")
+    parser.add_argument("--no-walk-forward", action="store_true", help="Disable walk-forward validation (incremental retraining)")
+    parser.add_argument("--retrain-interval", type=int, default=7, help="Days between model retraining for walk-forward validation (default: 7)")
 
     args = parser.parse_args()
 
@@ -1344,6 +1454,8 @@ Examples:
             "coins": coins,
             "speed": args.speed,
             "cache_dir": args.cache_dir,
+            "walk_forward_enabled": not args.no_walk_forward,
+            "retrain_interval_days": args.retrain_interval,
             "execution_model": {
                 "slippage_bps": 5,
                 "fee_bps": 20,
@@ -1358,6 +1470,10 @@ Examples:
         _atomic_write_json(config_path, config)
 
         print(f"\nBacktest config saved to: {config_path}")
+
+        # Set walk-forward parameters on the function for access in run_backtest
+        run_backtest._enable_walk_forward = not args.no_walk_forward
+        run_backtest._retrain_interval_days = args.retrain_interval
 
         # Run backtest
         run_backtest(args.start_date, args.end_date, coins, args.output_dir, args.speed, args.cache_dir)
