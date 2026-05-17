@@ -6,3 +6,4 @@ cryptography
 PyNaCl
 kucoin-python
 numpy
+streamlit

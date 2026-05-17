@@ -2205,6 +2205,16 @@ class PowerTraderHub(tk.Tk):
         )
         self.btn_toggle_all.pack(side="left")
 
+        self._paper_mode_var = tk.BooleanVar(
+            value=bool(self.settings.get("paper_mode", False))
+        )
+        ttk.Checkbutton(
+            start_all_row,
+            text="Paper Trade",
+            variable=self._paper_mode_var,
+            command=self._on_paper_mode_toggle,
+        ).pack(side="left", padx=(10, 0))
+
 
         # Account info (LEFT column, under status)
         acct_box = ttk.LabelFrame(controls_left, text="Account")
@@ -2983,7 +2993,7 @@ class PowerTraderHub(tk.Tk):
         finally:
             q.put(f"{prefix}[process exited]")
 
-    def _start_process(self, p: ProcInfo, log_q: Optional["queue.Queue[str]"] = None, prefix: str = "") -> None:
+    def _start_process(self, p: ProcInfo, log_q: Optional["queue.Queue[str]"] = None, prefix: str = "", extra_args: Optional[list] = None) -> None:
         if p.proc and p.proc.poll() is None:
             return
         if not os.path.isfile(p.path):
@@ -2993,9 +3003,10 @@ class PowerTraderHub(tk.Tk):
         env = os.environ.copy()
         env["POWERTRADER_HUB_DIR"] = self.hub_dir  # so rhcb writes where GUI reads
 
+        cmd = [sys.executable, "-u", p.path] + (extra_args or [])
         try:
             p.proc = subprocess.Popen(
-                [sys.executable, "-u", p.path],  # -u for unbuffered prints
+                cmd,
                 cwd=self.project_dir,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -3029,8 +3040,25 @@ class PowerTraderHub(tk.Tk):
         self._start_process(self.proc_neural, log_q=self.runner_log_q, prefix="[RUNNER] ")
 
 
+    def _on_paper_mode_toggle(self) -> None:
+        """Persist paper mode setting; warn if trader is already running."""
+        enabled = self._paper_mode_var.get()
+        self.settings["paper_mode"] = enabled
+        self._save_settings()
+        trader_running = bool(self.proc_trader.proc and self.proc_trader.proc.poll() is None)
+        if trader_running:
+            import tkinter.messagebox as _mb
+            _mb.showinfo(
+                "Paper Mode",
+                "Paper mode will take effect the next time the Trader is started.\n"
+                "Stop and restart the Trader to apply."
+            )
+
     def start_trader(self) -> None:
-        self._start_process(self.proc_trader, log_q=self.trader_log_q, prefix="[TRADER] ")
+        extra: list = []
+        if getattr(self, "_paper_mode_var", None) and self._paper_mode_var.get():
+            extra = ["--paper"]
+        self._start_process(self.proc_trader, log_q=self.trader_log_q, prefix="[TRADER] ", extra_args=extra)
 
 
     def stop_neural(self) -> None:
