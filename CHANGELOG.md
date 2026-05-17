@@ -2,7 +2,7 @@
 
 **Project:** PowerTrader AI
 **Repository:** JackSmack1971/power-trader-ai
-**Generated:** 2026-05-17
+**Generated:** 2026-05-17 (updated)
 **Coverage:** Complete project history from inception to present
 
 ---
@@ -57,6 +57,12 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
 - **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
+### Phase 7: Production Upgrades — Alerts, CCXT, Control Panel (May 2026)
+- **Telegram/Discord alerts** (`pt_alerts.py`): rate-limited multi-channel alert dispatcher; SIGNAL, TRADE, PNL, HEALTH, ERROR types; hooks wired into `pt_trader.py` buy/sell/entry paths; silently disabled when env vars absent
+- **CCXT multi-exchange adapter** (`pt_ccxt.py`): Binance/Bybit/OKX data source via CCXT; per-coin `ccxt_config.json` override; KuCoin remains default; backward-compatible KuCoin-indexed raw output for thinker/trainer
+- **Dashboard control panel** (`pt_dashboard.py`): new Control Panel tab with one-click start/stop for thinker/trader/trainer; settings wizard for coin list; alert config status display
+- **Tests**: 35 new tests for `pt_alerts` and `pt_ccxt_adapter` (100% coverage on new modules)
+
 ### Phase 6: Infrastructure & Scalability (May 2026)
 - **Docker** (`Dockerfile`, `docker-compose.yml`, `.env.example`, `.dockerignore`): one-command stack with paper-trader, thinker, trainer, Streamlit dashboard, and Redis services; volume-mount for persistent cache
 - **Redis IPC** (`pt_ipc.py`): opt-in Redis pub/sub bridge with file fallback; set `REDIS_URL` to enable; wired into thinker writes and trader reads
@@ -75,6 +81,33 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 ---
 
 ## Detailed Change History
+
+### v1.2.0 - Production Upgrades: Alerts, CCXT, Control Panel (2026-05-17)
+
+#### [pending] Ph3+Ph4: Telegram/Discord alerts, CCXT adapter, dashboard control panel
+**Date:** May 17, 2026
+**Author:** Claude
+
+Production upgrades implementing Ph3 (alerts), Ph4 (CCXT), and Ph2 remainder (dashboard control panel) from the roadmap. All additions are backward-compatible and opt-in via env vars.
+
+- `pt_alerts.py` — New module. Rate-limited alert dispatcher for Telegram (`TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID`) and Discord (`DISCORD_WEBHOOK_URL`). Per-type rate limits: SIGNAL 2 min, TRADE 10 s, PNL 5 min, HEALTH 1 h. Convenience wrappers: `signal_alert()`, `trade_alert()`, `pnl_alert()`, `health_alert()`, `error_alert()`. Silently disabled when env vars absent (zero-config default).
+- `pt_trader.py` — Wired alert hooks: entry signal gate, paper/live buy fills, paper/live sell fills (tag + pnl%). Import guard catches missing `pt_alerts` gracefully.
+- `pt_ccxt.py` — New module. CCXT multi-exchange data adapter with `CcxtAdapter` (Binance/Bybit/OKX) and `_KuCoinAdapter` (default). Per-coin exchange config via `ccxt_config.json`. Outputs KuCoin-style indexed lists for thinker/trainer backward compat. `get_market_client(coin)` factory; `market_client` module singleton.
+- `pt_dashboard.py` — New Control Panel tab: one-click start/stop for thinker/trader/trainer (PID persisted in `hub_data/dashboard_procs.json`); paper mode checkbox for trader launch; coins settings wizard with atomic save; alert config status display.
+- `requirements.txt` — Added `ccxt`, `pandas`.
+- `tests/test_alerts.py` — 18 tests covering rate limiting, Telegram/Discord dispatch, all convenience wrappers, alert type prefixes.
+- `tests/test_ccxt_adapter.py` — 17 tests covering symbol conversion, candle format conversions, KuCoin adapter, CCXT adapter, timeframe map, per-coin config, factory function.
+
+**Files Added/Modified:**
+- `pt_alerts.py` (new, +140 lines) — Telegram/Discord alert dispatcher
+- `pt_ccxt.py` (new, +220 lines) — CCXT multi-exchange data adapter
+- `pt_trader.py` (+25 lines) — Alert hook imports and call sites at trade events
+- `pt_dashboard.py` (+100 lines) — Control panel tab with process start/stop and settings wizard
+- `requirements.txt` (+2 lines) — `ccxt`, `pandas`
+- `tests/test_alerts.py` (new, +160 lines) — 18 tests for alert module
+- `tests/test_ccxt_adapter.py` (new, +200 lines) — 17 tests for CCXT adapter
+
+---
 
 ### v0.1.0 - Foundation (2025-12-28)
 

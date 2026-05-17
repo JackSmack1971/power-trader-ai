@@ -7,5 +7,7 @@ PyNaCl
 kucoin-python
 numpy
 streamlit
+pandas
 scipy
 redis
+ccxt

@@ -20,6 +20,22 @@ from kucoin.client import Market as _KucoinMarket
 # KuCoin market client used in paper mode for live price data (no auth needed)
 _kucoin_market = _KucoinMarket(url='https://api.kucoin.com')
 
+# Optional alert dispatching — silently disabled if pt_alerts not present or
+# env vars TELEGRAM_TOKEN / DISCORD_WEBHOOK_URL are unset.
+try:
+    import pt_alerts as _alerts
+    _ALERTS_ENABLED = True
+except ImportError:
+    _ALERTS_ENABLED = False
+
+
+def _fire_alert(alert_type: str, message: str, coin: str = "", force: bool = False) -> None:
+    if _ALERTS_ENABLED:
+        try:
+            _alerts.send(alert_type, message, coin=coin, force=force)
+        except Exception:
+            pass
+
 # -----------------------------
 # REPLAY MODE GLOBALS (set by main block)
 # -----------------------------
@@ -1025,6 +1041,7 @@ class CryptoAPITrading:
                 tag=tag, order_id=client_order_id,
             )
             print(f"[PAPER] BUY  {rounded_quantity:.8f} {coin} @ ${current_price:.2f}  cash left: ${self._paper['cash']:.2f}")
+            _fire_alert("TRADE", f"[PAPER] BUY {rounded_quantity:.6f} {coin} @ ${current_price:,.4f}  tag={tag or 'ENTRY'}", coin=coin, force=True)
             return {
                 "id": client_order_id, "state": "filled", "side": side,
                 "symbol": symbol, "executed_notional": amount_in_usd,
@@ -1109,6 +1126,8 @@ class CryptoAPITrading:
                         tag=tag,
                         order_id=order_id,
                     )
+                    coin = symbol.replace("-USD", "")
+                    _fire_alert("TRADE", f"BUY {rounded_quantity:.6f} {coin} @ ${current_price:,.4f}  tag={tag or 'ENTRY'}", coin=coin, force=True)
                     return response  # Successfully placed order
 
             except Exception as e:
@@ -1173,6 +1192,8 @@ class CryptoAPITrading:
                 tag=tag, order_id=client_order_id,
             )
             print(f"[PAPER] SELL {rounded_quantity:.8f} {coin} @ ${current_price:.2f}  cash: ${self._paper['cash']:.2f}")
+            pnl_str = f"  pnl={pnl_pct:+.2f}%" if pnl_pct is not None else ""
+            _fire_alert("TRADE", f"[PAPER] SELL {rounded_quantity:.6f} {coin} @ ${current_price:,.4f}{pnl_str}  tag={tag or 'SELL'}", coin=coin, force=True)
             return {
                 "id": client_order_id, "state": "filled", "side": side,
                 "symbol": symbol, "cumulative_quantity": rounded_quantity,
@@ -1244,6 +1265,10 @@ class CryptoAPITrading:
                 tag=tag,
                 order_id=order_id,
             )
+            coin = symbol.replace("-USD", "")
+            pnl_str = f"  pnl={pnl_pct:+.2f}%" if pnl_pct is not None else ""
+            price_str = f"${float(expected_price):,.4f}" if expected_price is not None else "market"
+            _fire_alert("TRADE", f"SELL {asset_quantity:.6f} {coin} @ {price_str}{pnl_str}  tag={tag or 'SELL'}", coin=coin, force=True)
 
         return response
 
@@ -1771,6 +1796,8 @@ class CryptoAPITrading:
             if not (buy_count >= entry_threshold and sell_count == 0):
                 start_index += 1
                 continue
+
+            _fire_alert("SIGNAL", f"Entry signal: {base_symbol}  long={buy_count}/7  short={sell_count}/7  threshold={entry_threshold}", coin=base_symbol)
 
             # Apply risk-overlay sizing before placing the entry order.
             sized_allocation = self._apply_risk_sizing(base_symbol, allocation_in_usd, buy_count)

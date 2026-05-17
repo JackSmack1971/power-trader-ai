@@ -15,10 +15,14 @@ import os
 import json
 import time
 import glob
+import subprocess
+import sys
+import signal
 from datetime import datetime
 from typing import Optional
 
 import streamlit as st
+import psutil
 
 # ── page config (must be first Streamlit call) ──────────────────────────
 st.set_page_config(
@@ -55,6 +59,90 @@ SIGNAL_LONG_PATH   = os.path.join(BASE_DIR, "long_dca_signal.txt")
 SIGNAL_SHORT_PATH  = os.path.join(BASE_DIR, "short_dca_signal.txt")
 BACKTEST_RESULTS_DIR = os.path.join(BASE_DIR, "backtest_results")
 GUI_SETTINGS_PATH  = os.path.join(BASE_DIR, "gui_settings.json")
+PROCESS_REGISTRY   = os.path.join(HUB_DIR, "dashboard_procs.json")
+
+# ── process control ───────────────────────────────────────────────────────
+
+_SCRIPTS = {
+    "thinker": "pt_thinker.py",
+    "trader":  "pt_trader.py",
+    "trainer": "pt_trainer.py",
+}
+
+
+def _load_proc_registry() -> dict:
+    try:
+        if os.path.isfile(PROCESS_REGISTRY):
+            with open(PROCESS_REGISTRY, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_proc_registry(reg: dict) -> None:
+    try:
+        os.makedirs(HUB_DIR, exist_ok=True)
+        tmp = PROCESS_REGISTRY + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(reg, f, indent=2)
+        os.replace(tmp, PROCESS_REGISTRY)
+    except Exception:
+        pass
+
+
+def _proc_alive(pid: int) -> bool:
+    try:
+        return psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except Exception:
+        return False
+
+
+def _start_process(name: str, extra_args: list | None = None) -> Optional[int]:
+    script = _SCRIPTS.get(name)
+    if not script:
+        return None
+    script_path = os.path.join(BASE_DIR, script)
+    if not os.path.isfile(script_path):
+        return None
+    cmd = [sys.executable, script_path] + (extra_args or [])
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=BASE_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return proc.pid
+    except Exception:
+        return None
+
+
+def _stop_process(pid: int) -> bool:
+    try:
+        p = psutil.Process(pid)
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            p.kill()
+        return True
+    except Exception:
+        return False
+
+
+def _get_process_statuses() -> dict:
+    reg = _load_proc_registry()
+    out = {}
+    for name in _SCRIPTS:
+        pid = reg.get(name)
+        if pid and _proc_alive(int(pid)):
+            out[name] = {"running": True, "pid": int(pid)}
+        else:
+            out[name] = {"running": False, "pid": None}
+    return out
+
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -151,8 +239,8 @@ with st.sidebar:
     st.caption(f"⏱ Last refresh: {datetime.now().strftime('%H:%M:%S')}")
 
 # ── TABS ─────────────────────────────────────────────────────────────────
-tab_live, tab_trades, tab_backtest = st.tabs(
-    ["📊 Live Dashboard", "📋 Trade Log", "🔬 Backtest Report"]
+tab_live, tab_trades, tab_backtest, tab_control = st.tabs(
+    ["📊 Live Dashboard", "📋 Trade Log", "🔬 Backtest Report", "⚙️ Control Panel"]
 )
 
 # ════════════════════════════════════════════════════════════════════════
@@ -361,6 +449,91 @@ with tab_backtest:
             "python pt_analyze.py backtest_results/<timestamped-dir>\n"
             "```"
         )
+
+# ════════════════════════════════════════════════════════════════════════
+# TAB 4 — CONTROL PANEL
+# ════════════════════════════════════════════════════════════════════════
+with tab_control:
+    st.subheader("Process Control")
+    st.caption("Start and stop PowerTrader AI subprocesses. PIDs are persisted in hub_data/dashboard_procs.json.")
+
+    proc_status = _get_process_statuses()
+    reg = _load_proc_registry()
+
+    paper_flag = st.checkbox("Paper trading mode (--paper)", value=True, key="ctrl_paper")
+
+    col_t, col_r, col_n = st.columns(3)
+    for col, name in [(col_t, "thinker"), (col_r, "trader"), (col_n, "trainer")]:
+        with col:
+            info = proc_status[name]
+            status_badge = "🟢 Running" if info["running"] else "⚫ Stopped"
+            st.markdown(f"**{name.capitalize()}**  {status_badge}")
+            if info["running"]:
+                st.caption(f"PID {info['pid']}")
+                if st.button(f"Stop {name}", key=f"stop_{name}"):
+                    _stop_process(info["pid"])
+                    reg.pop(name, None)
+                    _save_proc_registry(reg)
+                    st.success(f"{name} stopped.")
+                    st.rerun()
+            else:
+                extra = ["--paper"] if paper_flag and name == "trader" else []
+                if st.button(f"Start {name}", key=f"start_{name}"):
+                    pid = _start_process(name, extra)
+                    if pid:
+                        reg[name] = pid
+                        _save_proc_registry(reg)
+                        st.success(f"{name} started (PID {pid}).")
+                    else:
+                        st.error(f"Failed to start {name}.")
+                    st.rerun()
+
+    st.divider()
+
+    # ── Settings wizard ───────────────────────────────────────────────
+    st.subheader("Settings")
+    current_settings = _read_json(GUI_SETTINGS_PATH) or {}
+    current_coins_str = ",".join(current_settings.get("coins", ["BTC", "ETH", "XRP", "BNB", "DOGE"]))
+    coins_input = st.text_input(
+        "Tracked coins (comma-separated)",
+        value=current_coins_str,
+        help="E.g. BTC,ETH,SOL — restart thinker/trader after changing.",
+    )
+    if st.button("Save settings"):
+        new_coins = [c.strip().upper() for c in coins_input.split(",") if c.strip()]
+        if new_coins:
+            new_settings = dict(current_settings)
+            new_settings["coins"] = new_coins
+            tmp = GUI_SETTINGS_PATH + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(new_settings, f, indent=2)
+                os.replace(tmp, GUI_SETTINGS_PATH)
+                st.success(f"Saved coins: {new_coins}")
+            except Exception as e:
+                st.error(f"Save failed: {e}")
+        else:
+            st.warning("No valid coins entered.")
+
+    st.divider()
+
+    # ── Alert config hint ─────────────────────────────────────────────
+    st.subheader("Alert Configuration")
+    st.markdown(
+        "Set these environment variables to enable alerts:\n\n"
+        "| Variable | Purpose |\n"
+        "|---|---|\n"
+        "| `TELEGRAM_TOKEN` | Telegram bot token |\n"
+        "| `TELEGRAM_CHAT_ID` | Telegram chat/channel ID |\n"
+        "| `DISCORD_WEBHOOK_URL` | Discord webhook URL |\n\n"
+        "Run `python pt_alerts.py` to test delivery."
+    )
+    tg_configured = bool(os.environ.get("TELEGRAM_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+    dc_configured = bool(os.environ.get("DISCORD_WEBHOOK_URL"))
+    st.markdown(
+        f"Telegram: {'✅ configured' if tg_configured else '❌ not set'}  |  "
+        f"Discord: {'✅ configured' if dc_configured else '❌ not set'}"
+    )
 
 # ── auto-refresh ──────────────────────────────────────────────────────
 time.sleep(refresh_sec)
