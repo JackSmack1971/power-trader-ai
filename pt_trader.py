@@ -4,6 +4,7 @@ import json
 import uuid
 import time
 import math
+import sys
 from typing import Any, Dict, Optional
 import requests
 from nacl.signing import SigningKey
@@ -14,12 +15,25 @@ import traceback
 import argparse
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
+from kucoin.client import Market as _KucoinMarket
+
+# KuCoin market client used in paper mode for live price data (no auth needed)
+_kucoin_market = _KucoinMarket(url='https://api.kucoin.com')
 
 # -----------------------------
 # REPLAY MODE GLOBALS (set by main block)
 # -----------------------------
 REPLAY_MODE = False
 REPLAY_OUTPUT_DIR = None
+
+# -----------------------------
+# PAPER TRADING GLOBALS (set by main block)
+# -----------------------------
+PAPER_MODE = False
+PAPER_BALANCE = 10_000.0   # default starting cash; overridden by --paper-balance
+
+# Detect --paper early so the credential check below can be skipped at import time
+_EARLY_PAPER_MODE = '--paper' in sys.argv
 
 # -----------------------------
 # GUI HUB OUTPUTS
@@ -172,23 +186,30 @@ except Exception:
     BASE64_PRIVATE_KEY = ""
 
 if not API_KEY or not BASE64_PRIVATE_KEY:
-    print(
-        "\n[PowerTrader] Robinhood API credentials not found.\n"
-        "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
-        "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
-        "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
-    )
-    raise SystemExit(1)
+    if not _EARLY_PAPER_MODE:
+        print(
+            "\n[PowerTrader] Robinhood API credentials not found.\n"
+            "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
+            "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
+            "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
+            "To run without credentials, use: python pt_trader.py --paper\n"
+        )
+        raise SystemExit(1)
 
 class CryptoAPITrading:
     def __init__(self):
         # keep a copy of the folder map (same idea as trader.py)
         self.path_map = dict(base_paths)
 
-        self.api_key = API_KEY
-        private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
-        self.private_key = SigningKey(private_key_seed)
-        self.base_url = "https://trading.robinhood.com"
+        if not PAPER_MODE:
+            self.api_key = API_KEY
+            private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
+            self.private_key = SigningKey(private_key_seed)
+            self.base_url = "https://trading.robinhood.com"
+        else:
+            self.api_key = ""
+            self.private_key = None
+            self.base_url = ""
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0]  # Moved to instance variable
@@ -200,8 +221,16 @@ class CryptoAPITrading:
         self.pm_start_pct_no_dca = 5.0
         self.pm_start_pct_with_dca = 2.5
 
-        self.cost_basis = self.calculate_cost_basis()  # Initialize cost basis at startup
-        self.initialize_dca_levels()  # Initialize DCA levels based on historical buy orders
+        if not PAPER_MODE:
+            self.cost_basis = self.calculate_cost_basis()
+            self.initialize_dca_levels()
+        else:
+            self._paper: Dict[str, Any] = {}
+            self._init_paper_account()
+            self.cost_basis = {
+                coin: data["cost_basis"]
+                for coin, data in self._paper["holdings"].items()
+            }
 
         # GUI hub persistence
         self._pnl_ledger = self._load_pnl_ledger()
@@ -240,6 +269,44 @@ class CryptoAPITrading:
             os.replace(tmp, path)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Paper account state helpers
+    # ------------------------------------------------------------------
+
+    def _paper_account_path(self) -> str:
+        return os.path.join(HUB_DATA_DIR, "paper_account.json")
+
+    def _init_paper_account(self) -> None:
+        """Load persisted paper account or create a fresh one."""
+        path = self._paper_account_path()
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    self._paper = json.load(f)
+                print(f"[PAPER] Loaded existing paper account: ${self._paper.get('cash', 0):.2f} cash")
+                return
+        except Exception:
+            pass
+        self._paper = {
+            "cash": PAPER_BALANCE,
+            "holdings": {},   # {"BTC": {"qty": float, "cost_basis": float}}
+            "created_ts": time.time(),
+        }
+        self._save_paper_account()
+        print(f"[PAPER] New paper account created: ${PAPER_BALANCE:.2f} starting balance")
+
+    def _save_paper_account(self) -> None:
+        self._atomic_write_json(self._paper_account_path(), self._paper)
+
+    def _paper_price(self, symbol: str) -> float:
+        """Fetch live KuCoin spot price for a symbol like 'BTC-USD'."""
+        coin = symbol.replace("-USD", "")
+        try:
+            ticker = _kucoin_market.get_ticker(f"{coin}-USDT")
+            return float(ticker["price"])
+        except Exception:
+            return 0.0
 
     def _append_jsonl(self, path: str, obj: dict) -> None:
         try:
@@ -618,14 +685,30 @@ class CryptoAPITrading:
         }
 
     def get_account(self) -> Any:
+        if PAPER_MODE:
+            return {"buying_power": str(self._paper["cash"])}
         path = "/api/v1/crypto/trading/accounts/"
         return self.make_api_request("GET", path)
 
     def get_holdings(self) -> Any:
+        if PAPER_MODE:
+            results = []
+            for coin, data in self._paper["holdings"].items():
+                if float(data.get("qty", 0)) > 0:
+                    results.append({
+                        "asset_code": coin,
+                        "total_quantity": str(data["qty"]),
+                    })
+            return {"results": results}
         path = "/api/v1/crypto/trading/holdings/"
         return self.make_api_request("GET", path)
 
     def get_trading_pairs(self) -> Any:
+        if PAPER_MODE:
+            return [
+                {"symbol": f"{coin}-USD", "asset_code": coin, "quote_currency": "USD"}
+                for coin in crypto_symbols
+            ]
         path = "/api/v1/crypto/trading/trading_pairs/"
         response = self.make_api_request("GET", path)
 
@@ -700,6 +783,22 @@ class CryptoAPITrading:
         buy_prices = {}
         sell_prices = {}
         valid_symbols = []
+
+        # Paper mode: fetch live prices from KuCoin (no Robinhood auth needed)
+        if PAPER_MODE:
+            for symbol in symbols:
+                if symbol == "USDC-USD":
+                    continue
+                price = self._paper_price(symbol)
+                if price > 0:
+                    buy_prices[symbol] = price
+                    sell_prices[symbol] = price
+                    valid_symbols.append(symbol)
+                    try:
+                        self._last_good_bid_ask[symbol] = {"ask": price, "bid": price, "ts": time.time()}
+                    except Exception:
+                        pass
+            return buy_prices, sell_prices, valid_symbols
 
         # In replay mode, read prices from backtest_state.json
         if REPLAY_MODE:
@@ -787,6 +886,43 @@ class CryptoAPITrading:
         current_buy_prices, current_sell_prices, valid_symbols = self.get_price([symbol])
         current_price = current_buy_prices[symbol]
         asset_quantity = amount_in_usd / current_price
+
+        # Paper mode: simulate fill against live KuCoin price, update paper account
+        if PAPER_MODE:
+            rounded_quantity = round(asset_quantity, 8)
+            coin = symbol.replace("-USD", "")
+
+            if self._paper["cash"] < amount_in_usd:
+                print(f"[PAPER] Insufficient cash (${self._paper['cash']:.2f}) for ${amount_in_usd:.2f} buy")
+                return None
+
+            # Weighted-average cost basis
+            if coin in self._paper["holdings"] and self._paper["holdings"][coin]["qty"] > 0:
+                old_qty = self._paper["holdings"][coin]["qty"]
+                old_cb = self._paper["holdings"][coin]["cost_basis"]
+                new_cb = (old_qty * old_cb + rounded_quantity * current_price) / (old_qty + rounded_quantity)
+                self._paper["holdings"][coin]["cost_basis"] = new_cb
+                self._paper["holdings"][coin]["qty"] = round(old_qty + rounded_quantity, 8)
+            else:
+                self._paper["holdings"][coin] = {"qty": rounded_quantity, "cost_basis": current_price}
+
+            self._paper["cash"] = round(self._paper["cash"] - amount_in_usd, 8)
+            self._save_paper_account()
+            self.cost_basis[coin] = self._paper["holdings"][coin]["cost_basis"]
+
+            self._record_trade(
+                side="buy", symbol=symbol, qty=float(rounded_quantity),
+                price=float(current_price),
+                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                tag=tag, order_id=client_order_id,
+            )
+            print(f"[PAPER] BUY  {rounded_quantity:.8f} {coin} @ ${current_price:.2f}  cash left: ${self._paper['cash']:.2f}")
+            return {
+                "id": client_order_id, "state": "filled", "side": side,
+                "symbol": symbol, "executed_notional": amount_in_usd,
+                "cumulative_quantity": rounded_quantity,
+            }
 
         # In replay mode, write order to sim_orders.jsonl and return mock fill
         if REPLAY_MODE:
@@ -901,6 +1037,40 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
+        # Paper mode: simulate fill against live KuCoin price, update paper account
+        if PAPER_MODE:
+            rounded_quantity = round(asset_quantity, 8)
+            coin = symbol.replace("-USD", "")
+            current_price = self._paper_price(symbol)
+            if current_price <= 0:
+                print(f"[PAPER] Could not get price for {symbol}, skipping sell")
+                return None
+
+            proceeds = rounded_quantity * current_price
+            self._paper["cash"] = round(self._paper["cash"] + proceeds, 8)
+
+            if coin in self._paper["holdings"]:
+                new_qty = round(self._paper["holdings"][coin]["qty"] - rounded_quantity, 8)
+                if new_qty <= 0:
+                    del self._paper["holdings"][coin]
+                    self.cost_basis.pop(coin, None)
+                else:
+                    self._paper["holdings"][coin]["qty"] = new_qty
+
+            self._save_paper_account()
+            self._record_trade(
+                side="sell", symbol=symbol, qty=float(rounded_quantity),
+                price=float(current_price),
+                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                tag=tag, order_id=client_order_id,
+            )
+            print(f"[PAPER] SELL {rounded_quantity:.8f} {coin} @ ${current_price:.2f}  cash: ${self._paper['cash']:.2f}")
+            return {
+                "id": client_order_id, "state": "filled", "side": side,
+                "symbol": symbol, "cumulative_quantity": rounded_quantity,
+            }
+
         # In replay mode, write order to sim_orders.jsonl and return mock fill
         if REPLAY_MODE:
             rounded_quantity = round(asset_quantity, 8)
@@ -1546,23 +1716,25 @@ class CryptoAPITrading:
                 print(traceback.format_exc())
 
 if __name__ == "__main__":
-    # ====== REPLAY MODE SETUP ======
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--replay', action='store_true', help='Run in replay mode')
-    parser.add_argument('--replay-output-dir', default='backtest_results/latest', help='Output directory')
+    parser = argparse.ArgumentParser(description="PowerTrader AI - Execution Engine")
+    parser.add_argument('--replay', action='store_true', help='Run in backtesting replay mode')
+    parser.add_argument('--replay-output-dir', default='backtest_results/latest',
+                        help='Output directory for replay mode')
+    parser.add_argument('--paper', action='store_true',
+                        help='Paper trading mode: live KuCoin prices, simulated fills, no Robinhood keys needed')
+    parser.add_argument('--paper-balance', type=float, default=10_000.0,
+                        help='Starting cash balance for paper trading (default: $10,000)')
     args = parser.parse_args()
 
-    # Update global variables
     REPLAY_MODE = args.replay
     REPLAY_OUTPUT_DIR = args.replay_output_dir
+    PAPER_MODE = args.paper
+    PAPER_BALANCE = args.paper_balance
 
     if REPLAY_MODE:
-        # Redirect hub_data writes to replay output directory
         HUB_DATA_DIR = os.path.join(REPLAY_OUTPUT_DIR, "hub_data")
         os.makedirs(HUB_DATA_DIR, exist_ok=True)
 
-        # Update all hub data paths to use replay output directory (module-level globals)
-        import sys
         current_module = sys.modules[__name__]
         current_module.HUB_DATA_DIR = HUB_DATA_DIR
         current_module.TRADER_STATUS_PATH = os.path.join(HUB_DATA_DIR, "trader_status.json")
@@ -1572,6 +1744,15 @@ if __name__ == "__main__":
 
         print("=" * 60)
         print(f"REPLAY MODE ACTIVE - Output to {HUB_DATA_DIR}")
+        print("=" * 60)
+
+    if PAPER_MODE:
+        print("=" * 60)
+        print("PAPER TRADING MODE ACTIVE")
+        print(f"  Starting balance : ${PAPER_BALANCE:,.2f}")
+        print(f"  Price source     : KuCoin (live)")
+        print(f"  Order execution  : Simulated (no Robinhood API calls)")
+        print(f"  Account state    : {os.path.join(HUB_DATA_DIR, 'paper_account.json')}")
         print("=" * 60)
 
     trading_bot = CryptoAPITrading()

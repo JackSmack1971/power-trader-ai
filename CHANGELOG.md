@@ -57,6 +57,11 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
 - **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
+### Phase 4: UX/GUI Modernization & Paper Trading (May 2026)
+- **Streamlit Dashboard** (`pt_dashboard.py`): Live KPI panels, DCA signal gauges, equity curve, trade log, embedded backtest HTML reports
+- **Paper Trading Mode**: `--paper` flag in `pt_trader.py` simulates fills with live KuCoin prices, no Robinhood credentials required
+- **Hub Integration**: Paper Trade checkbox in GUI, settings persistence, subprocess arg passing
+
 ---
 
 ## Detailed Change History
@@ -920,6 +925,38 @@ Created `README.md` from scratch — the repository previously had no README, pr
 - Roadmap table (done vs. planned)
 - Contributing section calling out tab/space split and atomic write rule
 - Placeholder markers for setup GIF and GUI screenshots
+
+---
+
+#### UX/GUI Modernization & Paper Trading Mode
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #14
+**Branch:** `claude/codebase-onboarding-QJz5c` → `main`
+
+Implemented two major quality-of-life features: a Streamlit analytics dashboard and a full paper-trading simulation mode.
+
+**Files Added:**
+- `pt_dashboard.py` (367 lines) — Streamlit companion dashboard
+
+**Files Modified:**
+- `pt_trader.py` — added `--paper` / `--paper-balance` CLI flags; KuCoin-price-backed simulation of buy/sell fills; paper account state written to `hub_data/paper_account.json`; credential check bypassed in paper mode
+- `pt_hub.py` — added Paper Trade checkbox to Start toolbar; `_on_paper_mode_toggle()` with settings persistence; `start_trader()` and `_start_process()` updated to pass `--paper` arg when enabled
+- `requirements.txt` — added `streamlit`
+
+**Streamlit Dashboard Features:**
+- Dark-theme CSS override matching existing system aesthetic
+- Sidebar: auto-refresh slider (1–30 s), paper-account toggle, backtest report picker
+- Tab 1 (Live Dashboard): 4-column KPI row (account value, buying power, holdings, realized PnL), deployment progress bar, per-coin DCA signal intensity bars, equity curve line chart, open positions table, paper account detail section
+- Tab 2 (Trade Log): last 500 trades with colored buy/sell column, PnL summary metrics
+- Tab 3 (Backtest Report): `st.components.v1.html()` embedding of `analytics_report.html` from any `backtest_results/` subdirectory, event log expander
+
+**Paper Trading Features:**
+- `--paper` flag bypasses Robinhood credential requirement entirely
+- Live prices fetched from KuCoin REST API (`/api/v1/market/orderbook/level1`)
+- Weighted-average cost basis tracked per coin
+- `paper_account.json` written atomically to `hub_data/`; readable by the Streamlit dashboard in real time
+- Startup banner printed with initial balance, account path, and mode indicator
 
 ---
 
