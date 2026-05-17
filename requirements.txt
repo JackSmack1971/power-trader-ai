@@ -8,3 +8,4 @@ kucoin-python
 numpy
 streamlit
 scipy
+redis

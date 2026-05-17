@@ -1,0 +1,33 @@
+# Secrets — NEVER bake into image
+.env
+r_key.txt
+r_secret.txt
+*.pem
+*.key
+
+# Caches and large data (volume-mount instead)
+backtest_cache/
+backtest_results/
+optimizer_results/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Version control
+.git/
+.gitignore
+
+# Dev tooling
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+*.swo

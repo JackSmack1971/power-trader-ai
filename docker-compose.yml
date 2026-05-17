@@ -1,0 +1,107 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# PowerTrader AI — Docker Compose
+#
+# Quick start:
+#   1. cp .env.example .env
+#   2. Edit .env with your API keys and desired coins
+#   3. docker compose up dashboard          # monitoring only (no keys needed)
+#   4. docker compose up                    # full paper-trading stack
+#   5. docker compose --profile live up     # live trading (needs Robinhood keys)
+#
+# Volume layout:
+#   ./hub_data/           — real-time IPC state (shared across services)
+#   ./backtest_cache/     — cached KuCoin candles (expensive to re-download)
+#   ./backtest_results/   — analytics HTML reports
+#   ./optimizer_results/  — strategy optimizer outputs
+#   ./<COIN>/             — per-coin memory/weight model files
+# ---------------------------------------------------------------------------
+
+x-base: &base
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - ./hub_data:/app/hub_data
+    - ./backtest_cache:/app/backtest_cache
+    - ./backtest_results:/app/backtest_results
+    - ./optimizer_results:/app/optimizer_results
+    # Per-coin model directories — add more as needed
+    - ./BTC:/app/BTC
+    - ./ETH:/app/ETH
+    - ./DOGE:/app/DOGE
+    - ./XRP:/app/XRP
+    - ./BNB:/app/BNB
+
+services:
+  # ── Redis (optional fast IPC) ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Streamlit analytics dashboard ──────────────────────────────────────
+  dashboard:
+    <<: *base
+    command: >
+      streamlit run pt_dashboard.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.headless=true
+    ports:
+      - "8501:8501"
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Thinker (pattern matcher, reads KuCoin, writes DCA signals) ────────
+  thinker:
+    <<: *base
+    command: python -u pt_thinker.py
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Trainer (model trainer, background process) ───────────────────────
+  trainer:
+    <<: *base
+    command: python -u pt_trainer.py
+    depends_on:
+      - thinker
+
+  # ── Paper trader (default: no Robinhood keys needed) ──────────────────
+  trader:
+    <<: *base
+    command: python -u pt_trader.py --paper
+    depends_on:
+      - thinker
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+
+  # ── Live trader (requires Robinhood keys in .env) ─────────────────────
+  trader-live:
+    <<: *base
+    command: python -u pt_trader.py
+    profiles:
+      - live
+    depends_on:
+      - thinker
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+
+volumes:
+  redis_data:
