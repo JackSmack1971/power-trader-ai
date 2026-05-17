@@ -230,3 +230,21 @@ Python 3 raises `TabError` if you mix them within a single file. **Always match 
 9. **`_memory_cache` dict** in thinker/trainer caches memory/weight files in RAM keyed by timeframe (not coin). Multi-coin runs share this cache — be careful with path assumptions if refactoring.
 
 10. **Backtesting target:** 6-month backtest should complete in < 10 minutes at 10× speed, using < 2 GB RAM and < 500 MB cache per coin.
+
+---
+
+## 8. Persistent Rules for AI Assistants
+
+These rules apply to every session and must be followed automatically — no user prompt required.
+
+### Changelog maintenance (mandatory after every merge)
+
+**After every PR is merged into `main`, update `CHANGELOG.md` before ending the session.**
+
+- Add a new entry under `## Detailed Change History` following the existing format:
+  - Section header: `### vX.Y.Z - <title> (YYYY-MM-DD)`
+  - Subsection per commit/PR: `#### [<short-sha>] <commit title>`
+  - Fields: **Date**, **Author**, **Pull Request** (if applicable), bullet list of changes, **Files Added/Modified/Deleted**
+- Update the header fields at the top of the file: `**Generated:**` and `**Coverage:**`
+- If the merge adds new components or meaningfully changes existing ones, update the `## Component Evolution` section too
+- Commit the changelog update to the same branch as the work, or open a dedicated changelog PR immediately after the merge if the branch is already gone
