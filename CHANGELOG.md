@@ -2,7 +2,7 @@
 
 **Project:** PowerTrader AI
 **Repository:** JackSmack1971/power-trader-ai
-**Generated:** 2025-12-30
+**Generated:** 2026-05-17
 **Coverage:** Complete project history from inception to present
 
 ---
@@ -51,6 +51,11 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **Phase 6**: Observability & Testing (2,422 lines)
 
 **Total Implementation**: 6 phases, 9 pull requests, 6,085 lines of production code
+
+### Phase 3: Codebase Onboarding & Documentation (May 2026)
+- **Bug fixes**: `numpy` added to requirements, atomic writes for memory files, KuCoin mock in smoke tests
+- **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
+- **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
 ---
 
@@ -846,6 +851,75 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 
 - Merged Phase 6 implementation
 - **Backtesting system now production-ready**
+
+---
+
+### v1.1.0 - Codebase Onboarding & Documentation (2026-05-17)
+
+#### [8446328] Fix three bugs found during codebase onboarding
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #11 (merged)
+**Branch:** `claude/codebase-onboarding-QJz5c` → `main`
+
+Three issues identified during a full codebase onboarding audit and fixed in a single commit.
+
+**Files Modified:**
+- `requirements.txt` (+1 line) — added `numpy`, which `pt_analyze.py` imports but was missing from the install manifest; would cause `ImportError` on fresh installs
+- `pt_trainer.py` (+7/-18 lines) — added `_atomic_write_text()` helper and applied it in `flush_memory()`; the four memory/weight files (`memories_*.txt`, `memory_weights_*.txt`) were previously written with direct `open()` calls, risking corruption from partial writes during a crash
+- `tests/test_e2e_smoke.py` (+60/-30 lines) — patched `pt_replay.fetch_historical_klines` with `unittest.mock.patch` in both network-touching tests; added `_make_fake_candles()` to generate deterministic synthetic OHLCV data; `test_cache_warming_functionality` now asserts on mock call arguments instead of files only the real implementation would create; all three tests now pass fully offline
+
+---
+
+#### [5fff9f5] Expand CLAUDE.md with full codebase onboarding documentation
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #12 (merged)
+**Branch:** `claude/codebase-onboarding-QJz5c` → `main`
+
+Replaced the minimal 47-line `CLAUDE.md` stub with comprehensive onboarding documentation generated from a full codebase audit.
+
+**Files Modified:**
+- `CLAUDE.md` (47 → 230+ lines)
+
+**New sections added:**
+- Full architecture section with IPC file table and ASCII flow diagrams for both live trading and backtesting replay
+- Complete backtesting system documentation (`pt_replay.py`, `pt_analyze.py`, `pt_incremental_trainer.py`)
+- Indentation split gotcha: original files use hard tabs; backtesting files use 4 spaces; mixing raises `TabError`
+- `_atomic_write_text()` mandate extended to memory/weight plain-text files
+- KuCoin candle index quirk: non-standard order `[ts, open, close, high, low, volume, turnover]`
+- Training freshness gate: 14-day `trainer_last_training_time.txt` check
+- 10 documented gotchas and risks (critical + moderate + performance)
+- Persistent rules section for AI assistants (changelog maintenance mandate)
+
+---
+
+#### [adda530] Add comprehensive README.md
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #13 (merged)
+**Branch:** `claude/codebase-onboarding-QJz5c` → `main`
+
+Created `README.md` from scratch — the repository previously had no README, presenting a 404 to all visitors.
+
+**Files Added:**
+- `README.md` (538 lines)
+
+**Contents:**
+- Badges: Python version, platform (Windows), license, KuCoin, Robinhood Crypto
+- Two Mermaid architecture diagrams: live trading multi-process flow and backtesting replay flow
+- IPC file map table (all signal/state files with writer → reader direction)
+- 3-command quick start: `warm-cache` → `backtest` → `pt_analyze.py`
+- Full installation guide including API credential setup
+- Live trading section: signal mechanics, DCA threshold, training freshness gate
+- Backtesting section: step-by-step workflow, all CLI flags with examples, speed guide
+- Analytics section: Sharpe/Sortino/Calmar/max-drawdown explained, illustrative sample report output, market regime breakdown table
+- Execution model config reference (`backtest_config.json` parameters)
+- Full project structure tree with section labels
+- Testing section with CI credential gotcha documented
+- Roadmap table (done vs. planned)
+- Contributing section calling out tab/space split and atomic write rule
+- Placeholder markers for setup GIF and GUI screenshots
 
 ---
 
