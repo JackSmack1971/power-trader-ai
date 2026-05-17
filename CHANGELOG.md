@@ -57,6 +57,11 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
 - **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
+### Phase 6: Infrastructure & Scalability (May 2026)
+- **Docker** (`Dockerfile`, `docker-compose.yml`, `.env.example`, `.dockerignore`): one-command stack with paper-trader, thinker, trainer, Streamlit dashboard, and Redis services; volume-mount for persistent cache
+- **Redis IPC** (`pt_ipc.py`): opt-in Redis pub/sub bridge with file fallback; set `REDIS_URL` to enable; wired into thinker writes and trader reads
+- **Multi-coin env var**: `POWERTRADER_COINS=BTC,ETH,DOGE` overrides `gui_settings.json` in both thinker and trader — Docker-friendly coin selection
+
 ### Phase 5: Strategy & Algorithm Enhancements (May 2026)
 - **Strategy Optimizer** (`pt_optimizer.py`): grid / random / differential-evolution search over 5 trading parameters; each trial runs a full replay subprocess scored by Sharpe/Sortino/Calmar; writes `best_config.json` for live use
 - **Risk Overlays** (`pt_trader.py`): ATR-based position sizing, Kelly-criterion position multiplier, hard ATR stop-loss for high-intensity entries; all disabled by default, configurable via `optimizer_config.json`
@@ -995,6 +1000,38 @@ Adds a strategy optimizer and three risk overlays that layer on top of the exist
 - `_apply_risk_sizing(symbol, base_usd, signal_level)`: combines ATR volatility scaling and Kelly multiplier; only activates when `signal_level >= atr_sizing_min_signal` (default 6)
 - ATR stop-loss: set at `entry_price - stop_loss_atr_mult × ATR` on high-signal entries; checked each tick before DCA logic; cleared on trail-sell or stop-sell
 - All overlays **off by default** (`atr_sizing_enabled=False`, `kelly_sizing_enabled=False`, `stop_loss_enabled=False`) — enable via `optimizer_config.json`
+
+---
+
+#### Infrastructure & Scalability
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #17
+**Branch:** `claude/infrastructure` → `main`
+
+Adds Docker-based one-click deployment and an opt-in Redis pub/sub IPC layer with graceful file fallback.
+
+**Files Added:**
+- `Dockerfile` — Python 3.11-slim image with Tkinter, Xvfb, and all pip deps; default CMD runs Streamlit dashboard
+- `docker-compose.yml` — services: `redis`, `dashboard`, `thinker`, `trainer`, `trader` (paper), `trader-live` (live, `--profile live`)
+- `.env.example` — template for `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY_BASE64`, `POWERTRADER_COINS`, `REDIS_URL`
+- `.dockerignore` — excludes `.env`, `r_key.txt`, `r_secret.txt`, caches, `.git`
+- `pt_ipc.py` — `IPCBridge` class + module-level `ipc` singleton
+
+**Files Modified:**
+- `pt_thinker.py` — imports `_ipc` singleton; publishes to Redis after each signal file write (dual-write, non-breaking); `_load_gui_coins()` checks `POWERTRADER_COINS` env var first
+- `pt_trader.py` — `_read_long/short_dca_signal()` delegates to `ipc.read_signal()` (Redis-first, file fallback); `_load_gui_settings()` checks `POWERTRADER_COINS` env var first
+- `requirements.txt` — added `redis`
+
+**Docker quick start:**
+```bash
+cp .env.example .env          # fill in POWERTRADER_COINS
+docker compose up dashboard   # monitoring only (no keys needed)
+docker compose up             # full paper-trading stack
+docker compose --profile live up  # live trading
+```
+
+**Redis IPC:** set `REDIS_URL=redis://redis:6379` to activate; omit for pure-local file IPC (zero new deps needed at runtime).
 
 ---
 

@@ -20,6 +20,10 @@ import uuid
 import argparse
 
 from nacl.signing import SigningKey
+try:
+	from pt_ipc import ipc as _ipc
+except Exception:
+	_ipc = None
 
 # -----------------------------
 # Robinhood market-data (current ASK), same source as rhcb.py trader:
@@ -162,9 +166,16 @@ _gui_settings_cache = {
 
 def _load_gui_coins() -> list:
 	"""
-	Reads gui_settings.json and returns settings["coins"] as an uppercased list.
-	Caches by mtime so it is cheap to call frequently.
+	Returns the active coin list.  Priority order:
+	1. POWERTRADER_COINS env var (comma-separated, Docker-friendly)
+	2. gui_settings.json (hot-reloaded by mtime)
+	3. Hardcoded fallback defaults
 	"""
+	env_coins = os.environ.get("POWERTRADER_COINS", "").strip()
+	if env_coins:
+		parsed = [c.strip().upper() for c in env_coins.split(",") if c.strip()]
+		if parsed:
+			return parsed
 	try:
 		if not os.path.isfile(_GUI_SETTINGS_PATH):
 			return list(_gui_settings_cache["coins"])
@@ -583,6 +594,11 @@ def step_coin(sym: str):
 				f.write('0')
 			with open('short_dca_signal.txt', 'w+') as f:
 				f.write('0')
+			if _ipc is not None:
+				try:
+					_ipc.write_signal(sym, 'long', 0, base_dir='.')
+					_ipc.write_signal(sym, 'short', 0, base_dir='.')
+				except Exception: pass
 		except Exception:
 			pass
 		try:
@@ -1120,6 +1136,9 @@ def step_coin(sym: str):
 				f.write(str(pm))
 			with open('long_dca_signal.txt', 'w+') as f:
 				f.write(str(longs))
+			if _ipc is not None:
+				try: _ipc.write_signal(coin, 'long', longs, base_dir='.')
+				except Exception: pass
 
 			# short pm
 			current_pms = [m for m in margins if m != 0]
@@ -1134,6 +1153,9 @@ def step_coin(sym: str):
 				f.write(str(abs(pm)))
 			with open('short_dca_signal.txt', 'w+') as f:
 				f.write(str(shorts))
+			if _ipc is not None:
+				try: _ipc.write_signal(coin, 'short', shorts, base_dir='.')
+				except Exception: pass
 
 		except:
 			PrintException()

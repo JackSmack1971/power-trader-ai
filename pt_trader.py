@@ -67,11 +67,19 @@ _gui_settings_cache = {
 
 def _load_gui_settings() -> dict:
 	"""
-	Reads gui_settings.json and returns a dict with:
-	- coins: uppercased list
-	- main_neural_dir: string (may be None)
-	Caches by mtime so it is cheap to call frequently.
+	Returns a dict with coins and main_neural_dir.  Priority order:
+	1. POWERTRADER_COINS env var (comma-separated, Docker-friendly)
+	2. gui_settings.json (hot-reloaded by mtime)
+	3. Hardcoded fallback defaults
 	"""
+	env_coins_raw = os.environ.get("POWERTRADER_COINS", "").strip()
+	if env_coins_raw:
+		env_coins = [c.strip().upper() for c in env_coins_raw.split(",") if c.strip()]
+		if env_coins:
+			result = dict(_gui_settings_cache)
+			result["coins"] = env_coins
+			return result
+
 	try:
 		if not os.path.isfile(_GUI_SETTINGS_PATH):
 			return dict(_gui_settings_cache)
@@ -535,44 +543,29 @@ class CryptoAPITrading:
 
     @staticmethod
     def _read_long_dca_signal(symbol: str) -> int:
-        """
-        Reads long_dca_signal.txt from the per-coin folder (same folder rules as trader.py).
+        """Read long DCA signal via IPC bridge (Redis or file fallback).
 
         Used for:
         - Start gate: start trades at level 3+
-        - DCA assist: levels 4-7 map to trader DCA stages 0-3 (trade starts at level 3 => stage 0)
+        - DCA assist: levels 4-7 map to trader DCA stages 0-3
         """
+        from pt_ipc import ipc  # late import — bridge initialises on first use
         sym = str(symbol).upper().strip()
         folder = base_paths.get(sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym))
-        path = os.path.join(folder, "long_dca_signal.txt")
-        try:
-            with open(path, "r") as f:
-                raw = f.read().strip()
-            val = int(float(raw))
-            return val
-        except Exception:
-            return 0
-
+        return ipc.read_signal(sym, "long", base_dir=folder)
 
     @staticmethod
     def _read_short_dca_signal(symbol: str) -> int:
-        """
-        Reads short_dca_signal.txt from the per-coin folder (same folder rules as trader.py).
+        """Read short DCA signal via IPC bridge (Redis or file fallback).
 
         Used for:
         - Start gate: start trades at level 3+
-        - DCA assist: levels 4-7 map to trader DCA stages 0-3 (trade starts at level 3 => stage 0)
+        - DCA assist: levels 4-7 map to trader DCA stages 0-3
         """
+        from pt_ipc import ipc
         sym = str(symbol).upper().strip()
         folder = base_paths.get(sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym))
-        path = os.path.join(folder, "short_dca_signal.txt")
-        try:
-            with open(path, "r") as f:
-                raw = f.read().strip()
-            val = int(float(raw))
-            return val
-        except Exception:
-            return 0
+        return ipc.read_signal(sym, "short", base_dir=folder)
 
 
 
