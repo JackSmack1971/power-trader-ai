@@ -16,6 +16,7 @@ This module provides comprehensive analytics for backtest results including:
 import os
 import json
 import argparse
+import random
 import numpy as np
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
@@ -449,6 +450,87 @@ def validate_data_sources(kucoin_prices: List[float],
     }
 
 
+def monte_carlo_simulation(
+    equity_curve: List[float],
+    n_simulations: int = 500,
+    n_periods: Optional[int] = None,
+    seed: int = 42,
+) -> Dict:
+    """
+    Bootstrap Monte Carlo simulation of future equity paths.
+
+    Resamples observed period returns (with replacement) to generate N
+    simulated equity curves of the same length.  Reports VaR, CVaR,
+    probability of ruin (equity < 50% of start), and median final value.
+
+    Parameters
+    ----------
+    equity_curve : list of floats — historical account values
+    n_simulations : int — number of paths to simulate (default 500)
+    n_periods : int or None — periods per simulated path; defaults to len(equity_curve)
+    seed : int — RNG seed for reproducibility
+
+    Returns
+    -------
+    dict with keys:
+        paths          — list of N simulated final equity values
+        median_final   — median simulated final equity
+        var_95         — Value-at-Risk at 95% confidence ($ loss)
+        cvar_95        — Conditional VaR (expected loss beyond VaR) at 95%
+        var_99         — Value-at-Risk at 99% confidence
+        prob_ruin      — probability equity falls below 50% of start (0..1)
+        initial        — starting equity value
+        percentiles    — {5, 25, 50, 75, 95} percentile final values
+    """
+    if len(equity_curve) < 4:
+        return {
+            "paths": [], "median_final": 0.0,
+            "var_95": 0.0, "cvar_95": 0.0, "var_99": 0.0,
+            "prob_ruin": 0.0, "initial": equity_curve[0] if equity_curve else 0.0,
+            "percentiles": {},
+        }
+
+    arr = np.array(equity_curve, dtype=float)
+    returns = np.diff(arr) / arr[:-1]
+    returns = returns[np.isfinite(returns)]
+
+    if len(returns) == 0:
+        returns = np.array([0.0])
+
+    n_steps = n_periods or len(equity_curve)
+    rng = np.random.default_rng(seed)
+    initial = arr[0]
+
+    finals = []
+    for _ in range(n_simulations):
+        sampled = rng.choice(returns, size=n_steps, replace=True)
+        path_final = initial * np.prod(1.0 + sampled)
+        finals.append(float(path_final))
+
+    finals_arr = np.array(finals)
+    pnl = finals_arr - initial
+
+    var_95  = float(np.percentile(pnl, 5))
+    cvar_95 = float(pnl[pnl <= var_95].mean()) if (pnl <= var_95).any() else var_95
+    var_99  = float(np.percentile(pnl, 1))
+    ruin_threshold = initial * 0.5
+    prob_ruin = float((finals_arr < ruin_threshold).mean())
+
+    pcts = {str(p): float(np.percentile(finals_arr, p)) for p in [5, 25, 50, 75, 95]}
+
+    return {
+        "paths":        finals,
+        "median_final": float(np.median(finals_arr)),
+        "var_95":       var_95,
+        "cvar_95":      cvar_95,
+        "var_99":       var_99,
+        "prob_ruin":    prob_ruin,
+        "initial":      initial,
+        "percentiles":  pcts,
+        "n_simulations": n_simulations,
+    }
+
+
 def generate_analytics_report(backtest_dir: str, output_file: Optional[str] = None) -> str:
     """
     Generate comprehensive analytics report from backtest results.
@@ -500,6 +582,9 @@ def generate_analytics_report(backtest_dir: str, output_file: Optional[str] = No
     # Market regime analysis
     # For regime detection, we would need price data - placeholder for now
     regime_stats = {}
+
+    # Monte Carlo simulation (Ph5)
+    mc = monte_carlo_simulation(equity_curve, n_simulations=500, seed=42)
 
     # Generate HTML report
     html = f"""<!DOCTYPE html>
@@ -715,6 +800,46 @@ def generate_analytics_report(backtest_dir: str, output_file: Optional[str] = No
             <td><strong>Outperformance</strong></td>
             <td><strong>{(total_return - buy_hold['total_return_pct']):+.2f}%</strong></td>
             <td><strong>${(final_capital - buy_hold['final_value']):+,.2f}</strong></td>
+        </tr>
+    </table>
+
+    <h2>Monte Carlo Simulation ({mc['n_simulations']} paths)</h2>
+    <table>
+        <tr><th>Metric</th><th>Value</th><th>Notes</th></tr>
+        <tr>
+            <td>Median Final Value</td>
+            <td>${mc['median_final']:,.2f}</td>
+            <td>50th percentile of {mc['n_simulations']} bootstrap paths</td>
+        </tr>
+        <tr>
+            <td>5th Percentile</td>
+            <td>${mc['percentiles'].get('5', 0):,.2f}</td>
+            <td>Worst-case 5% scenario</td>
+        </tr>
+        <tr>
+            <td>95th Percentile</td>
+            <td>${mc['percentiles'].get('95', 0):,.2f}</td>
+            <td>Best-case 5% scenario</td>
+        </tr>
+        <tr>
+            <td>VaR 95%</td>
+            <td class="negative">${mc['var_95']:,.2f}</td>
+            <td>95% confidence max expected loss vs start</td>
+        </tr>
+        <tr>
+            <td>CVaR 95%</td>
+            <td class="negative">${mc['cvar_95']:,.2f}</td>
+            <td>Expected loss in the worst 5% of outcomes</td>
+        </tr>
+        <tr>
+            <td>VaR 99%</td>
+            <td class="negative">${mc['var_99']:,.2f}</td>
+            <td>99% confidence max expected loss vs start</td>
+        </tr>
+        <tr>
+            <td>Prob. of Ruin (&lt;50% of start)</td>
+            <td class="{'negative' if mc['prob_ruin'] > 0.1 else 'positive'}">{mc['prob_ruin']*100:.1f}%</td>
+            <td>Fraction of paths that halved the account</td>
         </tr>
     </table>
 

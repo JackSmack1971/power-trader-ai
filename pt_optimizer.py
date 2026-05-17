@@ -262,6 +262,199 @@ def _diffevo_samples(
 
 
 # ---------------------------------------------------------------------------
+# Bayesian optimization (Gaussian-process surrogate via scipy)
+# ---------------------------------------------------------------------------
+
+def _bayesian_samples(
+    space: dict,
+    max_evals: int,
+    seed: int,
+    runner_fn,  # callable(params) -> float score
+    n_initial: int = 5,
+) -> tuple[dict, float]:
+    """
+    Simple Bayesian optimization using a Gaussian-process surrogate model.
+
+    Falls back to random search if scipy/sklearn are not available.
+
+    Strategy:
+    1. Evaluate n_initial random points to seed the GP.
+    2. For each remaining evaluation, fit a GP to observed (X, y) pairs,
+       predict mean + std at candidate points, select the point with the
+       highest Upper Confidence Bound (UCB = mean + kappa * std).
+    3. Evaluate the selected point, update observations, repeat.
+    """
+    try:
+        from sklearn.gaussian_process import GaussianProcessRegressor  # type: ignore
+        from sklearn.gaussian_process.kernels import Matern              # type: ignore
+        _sklearn_available = True
+    except ImportError:
+        _sklearn_available = False
+
+    if not _sklearn_available:
+        print("[optimizer] scikit-learn not installed — falling back to random search for Bayesian method.")
+        samples = _random_samples(space, max_evals, seed)
+        best_p, best_s = None, -999.0
+        for p in samples:
+            s = runner_fn(p)
+            if s > best_s:
+                best_s, best_p = s, p
+        return best_p or samples[0], best_s
+
+    keys = list(space.keys())
+    # Build a dense candidate grid (integer indices per dimension)
+    import itertools as _it
+    all_index_combos = list(_it.product(*[range(len(v)) for v in space.values()]))
+
+    rng = random.Random(seed)
+    observed_X: list[list[int]] = []
+    observed_y: list[float] = []
+
+    def _indices_to_params(idx_vec: list) -> dict:
+        return {k: space[k][i] for k, i in zip(keys, idx_vec)}
+
+    def _evaluate(idx_vec: list) -> float:
+        params = _indices_to_params(idx_vec)
+        return runner_fn(params)
+
+    # Phase 1: random seed evaluations
+    seed_indices = rng.sample(all_index_combos, min(n_initial, len(all_index_combos)))
+    for idx_vec in seed_indices:
+        s = _evaluate(list(idx_vec))
+        observed_X.append(list(idx_vec))
+        observed_y.append(s)
+
+    remaining = max_evals - len(observed_X)
+    kappa = 2.576  # UCB exploration parameter
+
+    for _ in range(max(0, remaining)):
+        X_obs = [[float(v) for v in row] for row in observed_X]
+        y_obs = list(observed_y)
+
+        # Scale y to [-1, 1] for GP stability
+        y_arr = [v for v in y_obs if v > -999.0]
+        y_min, y_max = (min(y_arr), max(y_arr)) if y_arr else (-1.0, 1.0)
+        y_range = y_max - y_min if y_max != y_min else 1.0
+        y_scaled = [(y - y_min) / y_range if y > -999.0 else -1.0 for y in y_obs]
+
+        kernel = Matern(length_scale=1.0, nu=2.5)
+        gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-6, normalize_y=False, n_restarts_optimizer=2)
+        try:
+            gp.fit(X_obs, y_scaled)
+        except Exception:
+            # GP failed: pick random unexplored point
+            unexplored = [c for c in all_index_combos if list(c) not in observed_X]
+            if not unexplored:
+                break
+            next_idx = list(rng.choice(unexplored))
+        else:
+            # Evaluate UCB over all candidates
+            candidates = [list(c) for c in all_index_combos if list(c) not in observed_X]
+            if not candidates:
+                break
+            cand_X = [[float(v) for v in row] for row in candidates]
+            mu, sigma = gp.predict(cand_X, return_std=True)
+            ucb = mu + kappa * sigma
+            next_idx = candidates[int(ucb.argmax())]
+
+        s = _evaluate(next_idx)
+        observed_X.append(next_idx)
+        observed_y.append(s)
+
+    if not observed_y:
+        return _indices_to_params(list(all_index_combos[0])), -999.0
+
+    best_i = int(max(range(len(observed_y)), key=lambda i: observed_y[i]))
+    return _indices_to_params(observed_X[best_i]), observed_y[best_i]
+
+
+# ---------------------------------------------------------------------------
+# Optimizer results visualization (HTML report)
+# ---------------------------------------------------------------------------
+
+def _write_optimizer_report(output_dir: str, results: list[dict], metric: str) -> str:
+    """Generate an HTML report visualizing all optimizer trial scores."""
+    report_path = os.path.join(output_dir, "optimizer_report.html")
+
+    valid = [r for r in results if r.get("score", -999.0) > -999.0]
+    scores = [r["score"] for r in valid]
+    if not scores:
+        return report_path
+
+    best = max(valid, key=lambda r: r["score"])
+
+    # Inline SVG bar chart (no JS dependencies)
+    bar_width = 8
+    chart_height = 200
+    max_score = max(scores) if max(scores) > 0 else 1.0
+    min_score = min(scores)
+    score_range = max_score - min_score if max_score != min_score else 1.0
+
+    bars = []
+    for i, r in enumerate(valid):
+        s = r["score"]
+        pct = max(0.0, (s - min_score) / score_range)
+        bar_h = int(pct * chart_height)
+        x = i * (bar_width + 1)
+        color = "#00FF66" if s == max(scores) else "#3399FF"
+        bars.append(f'<rect x="{x}" y="{chart_height - bar_h}" width="{bar_width}" height="{bar_h}" fill="{color}" />')
+
+    svg_w = len(valid) * (bar_width + 1)
+    svg_chart = f'<svg width="{svg_w}" height="{chart_height}" style="background:#0B1220">' + "".join(bars) + "</svg>"
+
+    param_rows = ""
+    for k, v in best.get("params", {}).items():
+        param_rows += f"<tr><td>{k}</td><td>{v}</td></tr>"
+
+    trial_rows = ""
+    for r in sorted(valid, key=lambda x: x.get("score", -999.0), reverse=True)[:20]:
+        trial_rows += (
+            f"<tr><td>{r['trial']}</td>"
+            f"<td>{r['score']:.4f}</td>"
+            f"<td>{r['elapsed']:.0f}s</td>"
+            f"<td><small>{json.dumps(r['params'])}</small></td></tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<title>PowerTrader Optimizer Report</title>
+<style>
+body {{ background:#070B10; color:#C7D1DB; font-family:monospace; padding:20px; max-width:1200px; margin:0 auto; }}
+h1,h2 {{ color:#00FF66; }}
+table {{ border-collapse:collapse; width:100%; margin:16px 0; }}
+th {{ background:#0B1220; color:#00E5FF; padding:8px; text-align:left; }}
+td {{ padding:6px 8px; border-bottom:1px solid #243044; }}
+.best {{ color:#00FF66; font-weight:bold; }}
+</style>
+</head>
+<body>
+<h1>PowerTrader AI — Optimizer Report</h1>
+<p>Metric: <b>{metric}</b> &nbsp;|&nbsp; Trials: <b>{len(valid)}</b> &nbsp;|&nbsp; Best score: <b class="best">{best['score']:.4f}</b></p>
+
+<h2>Trial Scores</h2>
+{svg_chart}
+
+<h2>Best Configuration (trial {best['trial']})</h2>
+<table><tr><th>Parameter</th><th>Value</th></tr>{param_rows}</table>
+
+<h2>Top 20 Trials</h2>
+<table>
+<tr><th>#</th><th>Score</th><th>Time</th><th>Params</th></tr>
+{trial_rows}
+</table>
+<p style="color:#8B949E;font-size:0.8em">Generated {datetime.utcnow().isoformat()}Z</p>
+</body>
+</html>"""
+
+    tmp = report_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.replace(tmp, report_path)
+    return report_path
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
@@ -301,7 +494,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--coins",       default="BTC",  help="Comma-separated list, e.g. BTC,ETH")
     p.add_argument("--speed",       type=float, default=50.0,
                    help="Replay speed multiplier (higher = faster; default 50)")
-    p.add_argument("--method",      choices=["grid", "random", "diffevo"], default="random",
+    p.add_argument("--method",      choices=["grid", "random", "diffevo", "bayesian"], default="random",
                    help="Search strategy (default: random)")
     p.add_argument("--trials",      type=int, default=30,
                    help="Max number of trials (ignored for grid)")
@@ -367,24 +560,43 @@ def main() -> None:
             print(f"           ★ new best!")
         return score
 
+    all_results: list[dict] = []
+
+    def _run_and_record(params: dict) -> float:
+        idx_before = len(all_results)
+        score = _run(params)
+        # _run updates best_result in place; capture a snapshot of the latest trial
+        # by re-reading the jsonl tail
+        try:
+            with open(results_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if lines:
+                last = json.loads(lines[-1])
+                all_results.append(last)
+        except Exception:
+            pass
+        return score
+
     try:
         if args.method == "grid":
             combos = _grid_combos(PARAM_SPACE)
             print(f"  Grid search: {len(combos)} combinations\n")
             for params in combos:
-                _run(params)
+                _run_and_record(params)
 
         elif args.method == "random":
             samples = _random_samples(PARAM_SPACE, args.trials, args.seed)
             print(f"  Random search: {args.trials} trials\n")
             for params in samples:
-                _run(params)
+                _run_and_record(params)
 
-        else:  # diffevo
+        elif args.method == "diffevo":
             print(f"  Differential evolution: up to {args.trials} evaluations\n")
-            best_params, best_score = _diffevo_samples(
-                PARAM_SPACE, args.trials, args.seed, _run
-            )
+            _diffevo_samples(PARAM_SPACE, args.trials, args.seed, _run_and_record)
+
+        else:  # bayesian
+            print(f"  Bayesian optimization: up to {args.trials} evaluations\n")
+            _bayesian_samples(PARAM_SPACE, args.trials, args.seed, _run_and_record)
 
     except KeyboardInterrupt:
         print("\n[optimizer] interrupted — saving best found so far.")
@@ -404,6 +616,10 @@ def main() -> None:
             "  To apply: copy best_config.json to optimizer_config.json\n"
             "  at the project root — pt_trader.py will pick it up automatically.\n"
         )
+        # Generate HTML visualization report
+        if all_results:
+            rpt = _write_optimizer_report(output_dir, all_results, args.metric)
+            print(f"  Visualization report → {rpt}\n")
     else:
         print("\n[optimizer] no trials completed.")
 

@@ -82,9 +82,37 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 
 ## Detailed Change History
 
-### v1.2.0 - Production Upgrades: Alerts, CCXT, Control Panel (2026-05-17)
+### v1.2.0 - Production Upgrades: Alerts, CCXT, Monte Carlo, Optimizer v2 (2026-05-17)
 
-#### [pending] Ph3+Ph4: Telegram/Discord alerts, CCXT adapter, dashboard control panel
+#### [pending] Ph5: Monte Carlo analysis, optimizer v2 (Bayesian + visualization), Plotly equity curve
+**Date:** May 17, 2026
+**Author:** Claude
+
+Ph5 additions: Monte Carlo simulation in analytics, Bayesian search in optimizer, Plotly equity curve in dashboard, config examples, Docker tester service, README migration guide.
+
+- `pt_analyze.py` — `monte_carlo_simulation()`: 500-path bootstrap simulation; reports VaR/CVaR at 95%/99%, probability of ruin (<50% of start), percentiles (5/25/50/75/95). Integrated into `generate_analytics_report()` HTML. 15 unit tests.
+- `pt_optimizer.py` — `--method bayesian` using Gaussian-process surrogate (scikit-learn); Upper Confidence Bound acquisition. `_write_optimizer_report()` generates `optimizer_report.html` with inline SVG bar chart of all trial scores and top-20 table.
+- `pt_dashboard.py` — Equity curve upgraded from `st.line_chart` to Plotly with dark theme, gradient fill, dollar-prefix y-axis. Falls back to `st.line_chart` if plotly absent.
+- `docker-compose.yml` — Added `tester` profile service (runs `unittest discover`); alert/CCXT env vars forwarded to trader and trader-live.
+- `.env.example` — Documented `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK_URL`, `CCXT_EXCHANGE`, `CCXT_API_KEY`, `CCXT_API_SECRET`.
+- `ccxt_config.json.example` — Per-coin exchange override config template.
+- `README.md` — Roadmap updated (all Ph1-Ph4 marked Done); Migration Guide section added.
+- `requirements.txt` — Added `plotly`, `scikit-learn`.
+
+**Files Added/Modified:**
+- `pt_analyze.py` (+70 lines) — Monte Carlo function + HTML section
+- `pt_optimizer.py` (+150 lines) — Bayesian method + HTML visualization report
+- `pt_dashboard.py` (+25 lines) — Plotly equity curve with fallback
+- `docker-compose.yml` (+20 lines) — tester service, alert/CCXT env vars
+- `.env.example` (+20 lines) — Alert + CCXT env var documentation
+- `ccxt_config.json.example` (new, +8 lines) — Per-coin exchange config template
+- `README.md` (+60 lines) — Updated roadmap + Migration Guide
+- `requirements.txt` (+2 lines) — `plotly`, `scikit-learn`
+- `tests/test_monte_carlo.py` (new, +130 lines) — 15 Monte Carlo unit tests
+
+---
+
+#### [3d9ac4d] Ph3+Ph4: Telegram/Discord alerts, CCXT adapter, dashboard control panel (35 new tests)
 **Date:** May 17, 2026
 **Author:** Claude
 

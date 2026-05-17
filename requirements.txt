@@ -8,6 +8,8 @@ kucoin-python
 numpy
 streamlit
 pandas
+plotly
 scipy
 redis
 ccxt
+scikit-learn

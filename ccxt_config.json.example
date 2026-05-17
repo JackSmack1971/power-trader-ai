@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to ccxt_config.json and set exchange IDs per coin. Leave empty to use KuCoin (default).",
+  "_exchanges": "kucoin (default), binance, bybit, okx, kraken — any exchange supported by CCXT",
+  "BTC": "binance",
+  "ETH": "bybit",
+  "SOL": "binance"
+}

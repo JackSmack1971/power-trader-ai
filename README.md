@@ -500,13 +500,74 @@ All tests in `test_e2e_smoke.py` run **fully offline** — KuCoin API calls are 
 | ✅ Done | 7-timeframe memory-based pattern engine |
 | ✅ Done | Walk-forward backtesting with realistic execution simulation |
 | ✅ Done | Analytics suite (Sharpe, Sortino, Calmar, max drawdown, regime) |
-| ✅ Done | KuCoin mock in smoke tests |
-| 🔲 Planned | Paper trading mode (live data, simulated fills) |
-| 🔲 Planned | Strategy parameter optimization |
-| 🔲 Planned | Multi-exchange support |
-| 🔲 Planned | Real-time alerts (email / Telegram) |
-| 🔲 Planned | Web-based GUI |
-| 🔲 Planned | Linux / Mac support |
+| ✅ Done | Paper trading mode (`--paper` flag, live KuCoin prices) |
+| ✅ Done | Strategy parameter optimization (grid/random/diffevo/Bayesian) |
+| ✅ Done | Monte Carlo simulation in analytics reports |
+| ✅ Done | CCXT multi-exchange data adapter (Binance, Bybit, OKX…) |
+| ✅ Done | Telegram & Discord trade/signal alerts |
+| ✅ Done | Streamlit web dashboard with control panel (start/stop) |
+| ✅ Done | Docker one-command stack with Redis IPC |
+| 🔲 Planned | Linux / Mac path polish |
+| 🔲 Planned | Correlation-aware portfolio limits |
+| 🔲 Planned | Binance/Bybit order execution (CCXT exec adapter) |
+
+---
+
+## Migration Guide (v1.1 → v1.2)
+
+### New optional dependencies
+
+```bash
+pip install ccxt plotly scikit-learn
+# or use the full requirements.txt
+pip install -r requirements.txt
+```
+
+### Telegram / Discord alerts
+
+Set environment variables — no code changes required:
+
+```bash
+# .env (or export in shell)
+TELEGRAM_TOKEN=<your-bot-token>
+TELEGRAM_CHAT_ID=<your-chat-id>
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```
+
+Test delivery:
+
+```bash
+python pt_alerts.py
+```
+
+### CCXT multi-exchange data
+
+Set `CCXT_EXCHANGE` to switch from KuCoin to another exchange for market data:
+
+```bash
+CCXT_EXCHANGE=binance python pt_trader.py --paper
+```
+
+Per-coin override via `ccxt_config.json` (see `ccxt_config.json.example`).  
+KuCoin remains the default — no change needed if you don't set these.
+
+### Dashboard control panel
+
+The Streamlit dashboard now includes a **Control Panel** tab for starting/stopping subprocesses and editing coin settings without restarting the hub. Access it at `http://localhost:8501` after `streamlit run pt_dashboard.py`.
+
+### Optimizer v2 (Bayesian search)
+
+```bash
+python pt_optimizer.py \
+    --start-date 2024-01-01 --end-date 2024-06-01 \
+    --coins BTC --trials 30 --method bayesian --metric sharpe
+# → optimizer_results/<run>/optimizer_report.html  (visualization)
+# → optimizer_results/<run>/best_config.json       (apply to live trading)
+```
+
+### Monte Carlo in analytics reports
+
+Monte Carlo (500 bootstrap paths) is now included automatically in every analytics HTML report.  No configuration needed — it runs as part of `python pt_analyze.py <backtest_dir>`.
 
 ---
 

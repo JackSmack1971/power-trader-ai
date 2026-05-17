@@ -90,7 +90,13 @@ services:
     depends_on:
       - thinker
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      REDIS_URL:             ${REDIS_URL:-redis://redis:6379}
+      TELEGRAM_TOKEN:        ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_ID:      ${TELEGRAM_CHAT_ID:-}
+      DISCORD_WEBHOOK_URL:   ${DISCORD_WEBHOOK_URL:-}
+      CCXT_EXCHANGE:         ${CCXT_EXCHANGE:-}
+      CCXT_API_KEY:          ${CCXT_API_KEY:-}
+      CCXT_API_SECRET:       ${CCXT_API_SECRET:-}
 
   # ── Live trader (requires Robinhood keys in .env) ─────────────────────
   trader-live:
@@ -102,6 +108,23 @@ services:
       - thinker
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      TELEGRAM_TOKEN:        ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_ID:      ${TELEGRAM_CHAT_ID:-}
+      DISCORD_WEBHOOK_URL:   ${DISCORD_WEBHOOK_URL:-}
+      CCXT_EXCHANGE:         ${CCXT_EXCHANGE:-}
+      CCXT_API_KEY:          ${CCXT_API_KEY:-}
+      CCXT_API_SECRET:       ${CCXT_API_SECRET:-}
+
+  # ── Test runner (CI / docker compose up --exit-code-from tester) ──────
+  tester:
+    <<: *base
+    command: >
+      python -m unittest discover -s tests
+    environment:
+      PYTHONIOENCODING: utf-8
+    profiles:
+      - test
+    restart: "no"
 
 volumes:
   redis_data:

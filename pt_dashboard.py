@@ -314,17 +314,45 @@ with tab_live:
 
     st.divider()
 
-    # ── Equity Curve ──
+    # ── Equity Curve (Plotly) ──
     st.subheader("Equity Curve")
     history = _read_all_jsonl(ACCT_HISTORY_PATH)
     if history:
         import pandas as pd
-        df_eq = pd.DataFrame(history)
-        df_eq["time"] = pd.to_datetime(df_eq["ts"], unit="s")
-        df_eq = df_eq.set_index("time")[["total_account_value"]].rename(
-            columns={"total_account_value": "Account Value ($)"}
-        )
-        st.line_chart(df_eq, height=280)
+        try:
+            import plotly.graph_objects as go
+            df_eq = pd.DataFrame(history)
+            df_eq["time"] = pd.to_datetime(df_eq["ts"], unit="s")
+            df_eq = df_eq.sort_values("time")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df_eq["time"],
+                y=df_eq["total_account_value"],
+                mode="lines",
+                line={"color": "#00FF66", "width": 2},
+                name="Account Value",
+                fill="tozeroy",
+                fillcolor="rgba(0,255,102,0.08)",
+            ))
+            fig.update_layout(
+                height=280,
+                margin={"l": 40, "r": 20, "t": 10, "b": 40},
+                paper_bgcolor="#070B10",
+                plot_bgcolor="#0B1220",
+                font={"color": "#C7D1DB"},
+                xaxis={"gridcolor": "#243044", "showgrid": True},
+                yaxis={"gridcolor": "#243044", "showgrid": True, "tickprefix": "$"},
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            # plotly not installed — fall back to st.line_chart
+            df_eq = pd.DataFrame(history)
+            df_eq["time"] = pd.to_datetime(df_eq["ts"], unit="s")
+            df_eq = df_eq.set_index("time")[["total_account_value"]].rename(
+                columns={"total_account_value": "Account Value ($)"}
+            )
+            st.line_chart(df_eq, height=280)
     else:
         st.info("No equity history yet — start trading or run a backtest.")
 
