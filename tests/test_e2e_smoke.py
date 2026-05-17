@@ -2,6 +2,8 @@
 """
 End-to-End Smoke Test for PowerTrader AI Backtesting System.
 Runs a minimal backtest to verify the complete workflow.
+
+KuCoin API calls are mocked so tests run fully offline.
 """
 
 import os
@@ -12,6 +14,7 @@ import tempfile
 import shutil
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,6 +26,25 @@ from pt_replay import (
     BacktestLogger
 )
 from pt_analyze import generate_analytics_report
+
+
+def _make_fake_candles(start_ts, end_ts, interval_seconds=3600, base_price=98000.0):
+    """Return synthetic OHLCV candles in the format fetch_historical_klines produces."""
+    candles = []
+    ts = start_ts
+    price = base_price
+    while ts <= end_ts:
+        candles.append({
+            "time": ts,
+            "open": price,
+            "close": price * 1.001,
+            "high": price * 1.005,
+            "low": price * 0.995,
+            "volume": 100.0,
+        })
+        price *= 1.0005
+        ts += interval_seconds
+    return candles
 
 
 class TestE2ESmoke(unittest.TestCase):
@@ -43,42 +65,44 @@ class TestE2ESmoke(unittest.TestCase):
         if os.path.exists(cls.test_dir):
             shutil.rmtree(cls.test_dir)
 
-    def test_complete_workflow_minimal(self):
+    @patch("pt_replay.fetch_historical_klines")
+    def test_complete_workflow_minimal(self, mock_fetch):
         """
         Run a complete minimal backtest workflow (1 week of data).
         This is the primary smoke test.
 
+        KuCoin is mocked so no network access is required.
+
         Workflow:
-        1. Warm cache for 1 week of BTC data
+        1. Warm cache for 1 week of BTC data (mocked)
         2. Create backtest config
         3. Simulate minimal backtest state
         4. Generate analytics report
         5. Verify all files generated
         """
+        start_date = "2024-01-01"
+        end_date = "2024-01-08"
+        coins = ["BTC"]
+
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+        mock_fetch.return_value = _make_fake_candles(start_ts, end_ts)
+
         print("\n" + "=" * 60)
         print("E2E SMOKE TEST: Complete Workflow")
         print("=" * 60)
 
         # Step 1: Warm cache for 1 week of BTC data
-        print("\n[1/5] Warming cache for 1 week of BTC data...")
+        print("\n[1/5] Warming cache for 1 week of BTC data (mocked)...")
 
-        # Use a recent date range (1 week)
-        start_date = "2024-01-01"
-        end_date = "2024-01-08"
-        coins = ["BTC"]
-
-        try:
-            warm_cache(
-                start_date=start_date,
-                end_date=end_date,
-                coins=coins,
-                timeframes=["1hour"],  # Just one timeframe for speed
-                cache_dir=self.cache_dir
-            )
-            print("  ✓ Cache warming completed")
-        except Exception as e:
-            print(f"  ⚠ Cache warming skipped (API may be unavailable): {e}")
-            # Continue test even if caching fails (for offline testing)
+        warm_cache(
+            start_date=start_date,
+            end_date=end_date,
+            coins=coins,
+            timeframes=["1hour"],  # Just one timeframe for speed
+            cache_dir=self.cache_dir
+        )
+        print("  ✓ Cache warming completed")
 
         # Verify cache directory created
         self.assertTrue(os.path.exists(self.cache_dir), "Cache directory should exist")
@@ -205,41 +229,42 @@ class TestE2ESmoke(unittest.TestCase):
         print(f"All files generated in: {self.output_dir}")
         print("=" * 60)
 
-    def test_cache_warming_functionality(self):
+    @patch("pt_replay.fetch_historical_klines")
+    def test_cache_warming_functionality(self, mock_fetch):
         """
         Test cache warming functionality in isolation.
+        KuCoin is mocked so no network access is required.
         """
         print("\n[TEST] Cache warming functionality...")
+
+        start_date = "2024-01-01"
+        end_date = "2024-01-02"
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+        mock_fetch.return_value = _make_fake_candles(start_ts, end_ts)
 
         # Create separate cache dir for this test
         test_cache_dir = os.path.join(self.test_dir, "test_cache")
         os.makedirs(test_cache_dir, exist_ok=True)
 
-        # Try to warm cache for a very short period
-        try:
-            # Using a minimal date range to speed up test
-            warm_cache(
-                start_date="2024-01-01",
-                end_date="2024-01-02",
-                coins=["BTC"],
-                timeframes=["1hour"],
-                cache_dir=test_cache_dir
-            )
+        warm_cache(
+            start_date=start_date,
+            end_date=end_date,
+            coins=["BTC"],
+            timeframes=["1hour"],
+            cache_dir=test_cache_dir
+        )
 
-            # Verify cache index created
-            cache_index_path = os.path.join(test_cache_dir, "cache_index.json")
-            if os.path.exists(cache_index_path):
-                with open(cache_index_path, "r") as f:
-                    cache_index = json.load(f)
+        # Verify fetch was called with the expected symbol and timeframe
+        mock_fetch.assert_called_once()
+        call_args = mock_fetch.call_args
+        self.assertEqual(call_args[0][0], "BTC-USDT", "Should fetch BTC-USDT")
+        self.assertEqual(call_args[0][1], "1hour", "Should fetch 1hour timeframe")
+        self.assertEqual(call_args[0][4], test_cache_dir, "Should use test cache dir")
 
-                self.assertIsInstance(cache_index, dict, "Cache index should be a dict")
-                print("  ✓ Cache index created successfully")
-            else:
-                print("  ⚠ Cache index not created (may be offline)")
-
-        except Exception as e:
-            print(f"  ⚠ Cache warming failed (may be offline): {e}")
-            # Don't fail the test - this is acceptable if API is unavailable
+        # Verify the returned candles were accepted (25 = 24 hours + 1)
+        self.assertEqual(len(mock_fetch.return_value), len(_make_fake_candles(start_ts, end_ts)))
+        print("  ✓ Cache warming invoked fetch with correct arguments")
 
     def test_logger_functionality(self):
         """

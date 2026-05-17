@@ -149,6 +149,13 @@ def load_memory(tf_choice):
 	_memory_cache[tf_choice] = data
 	return data
 
+def _atomic_write_text(path, text):
+	"""Atomic write for plain-text files: write to .tmp then os.replace()."""
+	tmp = path + ".tmp"
+	with open(tmp, "w+", encoding="utf-8") as f:
+		f.write(text)
+	os.replace(tmp, path)
+
 def flush_memory(tf_choice, force=False):
 	"""Write memories/weights back to disk only when they changed (batch IO)."""
 	data = _memory_cache.get(tf_choice)
@@ -157,23 +164,23 @@ def flush_memory(tf_choice, force=False):
 	if (not data.get("dirty")) and (not force):
 		return
 	try:
-		with open(f"memories_{tf_choice}.txt", "w+", encoding="utf-8") as f:
-			f.write("~".join([x for x in data["memory_list"] if str(x).strip() != ""]))
+		_atomic_write_text(f"memories_{tf_choice}.txt",
+			"~".join([x for x in data["memory_list"] if str(x).strip() != ""]))
 	except:
 		pass
 	try:
-		with open(f"memory_weights_{tf_choice}.txt", "w+", encoding="utf-8") as f:
-			f.write(" ".join([str(x) for x in data["weight_list"] if str(x).strip() != ""]))
+		_atomic_write_text(f"memory_weights_{tf_choice}.txt",
+			" ".join([str(x) for x in data["weight_list"] if str(x).strip() != ""]))
 	except:
 		pass
 	try:
-		with open(f"memory_weights_high_{tf_choice}.txt", "w+", encoding="utf-8") as f:
-			f.write(" ".join([str(x) for x in data["high_weight_list"] if str(x).strip() != ""]))
+		_atomic_write_text(f"memory_weights_high_{tf_choice}.txt",
+			" ".join([str(x) for x in data["high_weight_list"] if str(x).strip() != ""]))
 	except:
 		pass
 	try:
-		with open(f"memory_weights_low_{tf_choice}.txt", "w+", encoding="utf-8") as f:
-			f.write(" ".join([str(x) for x in data["low_weight_list"] if str(x).strip() != ""]))
+		_atomic_write_text(f"memory_weights_low_{tf_choice}.txt",
+			" ".join([str(x) for x in data["low_weight_list"] if str(x).strip() != ""]))
 	except:
 		pass
 	data["dirty"] = False
