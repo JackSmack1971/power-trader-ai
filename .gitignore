@@ -23,6 +23,15 @@ ENV/
 # Secrets
 r_key.txt
 r_secret.txt
+.env
+
+# Virtual environment (uv)
+.venv/
+
+# Optimizer / backtest runtime outputs
+optimizer_results/
+hub_data/
+*.tmp
 
 # Settings
 gui_settings.json

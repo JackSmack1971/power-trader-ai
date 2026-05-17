@@ -2,7 +2,7 @@
 
 **Project:** PowerTrader AI
 **Repository:** JackSmack1971/power-trader-ai
-**Generated:** 2026-05-17 (updated)
+**Generated:** 2026-05-17 (updated Ph5 correlation limits + Ph6 path audit)
 **Coverage:** Complete project history from inception to present
 
 ---
@@ -57,6 +57,12 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
 - **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
+### Phase 8: Ph5 Remainder + Ph6 Polish — Correlation Limits, Path Audit, Secret Scan (May 2026)
+- **Correlation-aware portfolio limits** (`pt_trader.py`): `_calc_correlation_matrix()` and `_is_correlated_entry_blocked()` methods; disabled by default, enabled via `optimizer_config.json`; plugged into entry gate before position opens
+- **Ph6 path audit**: confirmed all path joins use `os.path.join` / `os.path.dirname(__file__)` — no hardcoded backslash separators; cross-platform safe
+- **Secret scan** (`.github/scripts/secret-scan.sh`): CI gate checking for committed secret files, hardcoded credential patterns, and `.gitignore` coverage
+- **Tests**: 12 new tests for `test_correlation_limits`; full suite 83/83 passing
+
 ### Phase 7: Production Upgrades — Alerts, CCXT, Control Panel (May 2026)
 - **Telegram/Discord alerts** (`pt_alerts.py`): rate-limited multi-channel alert dispatcher; SIGNAL, TRADE, PNL, HEALTH, ERROR types; hooks wired into `pt_trader.py` buy/sell/entry paths; silently disabled when env vars absent
 - **CCXT multi-exchange adapter** (`pt_ccxt.py`): Binance/Bybit/OKX data source via CCXT; per-coin `ccxt_config.json` override; KuCoin remains default; backward-compatible KuCoin-indexed raw output for thinker/trainer
@@ -81,6 +87,27 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 ---
 
 ## Detailed Change History
+
+### v1.3.0 - Ph5 Correlation Limits + Ph6 Path/Security Audit (2026-05-17)
+
+#### [pending] Ph5 remainder + Ph6: correlation-aware portfolio limits, Linux/macOS path audit, CI secret scan
+**Date:** May 17, 2026
+**Author:** Claude
+
+Completes Ph5 dynamic risk management with correlation-aware position limits, adds Ph6 security tooling, and audits cross-platform path handling.
+
+- `pt_trader.py` — `_calc_correlation_matrix(symbols)`: computes Pearson r of hourly close returns over `correlation_window` candles (pure stdlib, no numpy dependency). `_is_correlated_entry_blocked(candidate, held_symbols)`: returns True when opening candidate would push the number of highly-correlated holdings above `max_correlated_positions`. Both methods disabled by default (`correlation_limit_enabled = False`); opt-in via `optimizer_config.json` keys. Called in `manage_trades()` entry gate after signal threshold check.
+- `tests/test_correlation_limits.py` — 12 tests: positive/negative correlation, self-correlation, API failure fallback, symmetry, block/pass logic, disabled mode, empty holdings.
+- `.github/scripts/secret-scan.sh` — CI bash script: checks committed secret files, scans tracked Python/config files for hardcoded credentials, verifies `.gitignore` coverage. Exits 1 on failure.
+- Path audit: all `pt_*.py` files use `os.path.join` / `os.path.dirname(os.path.abspath(__file__))` — no hardcoded Windows backslash separators; cross-platform compatible.
+
+**Files Added/Modified:**
+- `pt_trader.py` (+70 lines) — correlation matrix + entry-blocked methods; config variables; entry gate hook
+- `tests/test_correlation_limits.py` (new, +200 lines) — 12 unit tests for correlation limits
+- `.github/scripts/secret-scan.sh` (new, +108 lines) — CI credential leak scanner
+- `CHANGELOG.md` (+30 lines) — this entry
+
+---
 
 ### v1.2.0 - Production Upgrades: Alerts, CCXT, Monte Carlo, Optimizer v2 (2026-05-17)
 

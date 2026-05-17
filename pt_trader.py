@@ -290,6 +290,12 @@ class CryptoAPITrading:
         self.stop_loss_min_signal  = 6      # only attach stop on high-intensity entries
         self._stop_levels: Dict[str, float] = {}  # symbol → stop price
 
+        # ── correlation-aware position limits ──
+        self.correlation_limit_enabled   = False
+        self.max_correlated_positions    = 3     # max simultaneous holdings with high pairwise correlation
+        self.correlation_threshold       = 0.85  # Pearson r above which coins are "correlated"
+        self.correlation_window          = 30    # candles of 1-hour data used for correlation calc
+
         self._apply_optimizer_config()
 
 
@@ -329,9 +335,13 @@ class CryptoAPITrading:
                 "atr_target_vol_pct":      float,
                 "kelly_sizing_enabled":    bool,
                 "kelly_min_trades":        int,
-                "stop_loss_enabled":       bool,
-                "stop_loss_atr_mult":      float,
-                "stop_loss_min_signal":    int,
+                "stop_loss_enabled":           bool,
+                "stop_loss_atr_mult":          float,
+                "stop_loss_min_signal":        int,
+                "correlation_limit_enabled":   bool,
+                "max_correlated_positions":    int,
+                "correlation_threshold":       float,
+                "correlation_window":          int,
             }
             for key, cast in scalar_overrides.items():
                 if key in cfg:
@@ -407,6 +417,68 @@ class CryptoAPITrading:
         except Exception:
             pass
         return max(result, 1.0)
+
+    def _calc_correlation_matrix(self, symbols: list) -> Dict[str, Dict[str, float]]:
+        """Compute pairwise Pearson correlation of recent hourly close returns.
+        Returns nested dict: matrix[coinA][coinB] = r.  Missing pairs default to 0.0."""
+        matrix: Dict[str, Dict[str, float]] = {s: {} for s in symbols}
+        if len(symbols) < 2:
+            return matrix
+        closes: Dict[str, list] = {}
+        for sym in symbols:
+            try:
+                candles = _kucoin_market.get_kline(f"{sym}-USDT", "1hour", limit=self.correlation_window + 2)
+                if candles and len(candles) >= 4:
+                    prices = [float(c[2]) for c in reversed(candles)]  # index 2 = close
+                    closes[sym] = prices
+            except Exception:
+                pass
+        for a in symbols:
+            for b in symbols:
+                if a == b:
+                    matrix[a][b] = 1.0
+                    continue
+                if b in matrix[a]:
+                    continue
+                if a not in closes or b not in closes:
+                    matrix[a][b] = matrix[b][a] = 0.0
+                    continue
+                pa, pb = closes[a], closes[b]
+                n = min(len(pa), len(pb)) - 1
+                if n < 3:
+                    matrix[a][b] = matrix[b][a] = 0.0
+                    continue
+                ra = [pa[i+1]/pa[i] - 1 for i in range(n)]
+                rb = [pb[i+1]/pb[i] - 1 for i in range(n)]
+                mean_a = sum(ra) / n
+                mean_b = sum(rb) / n
+                cov = sum((ra[i]-mean_a)*(rb[i]-mean_b) for i in range(n))
+                var_a = sum((x-mean_a)**2 for x in ra)
+                var_b = sum((x-mean_b)**2 for x in rb)
+                denom = (var_a * var_b) ** 0.5
+                r = cov / denom if denom > 1e-12 else 0.0
+                matrix[a][b] = matrix[b][a] = max(-1.0, min(1.0, r))
+        return matrix
+
+    def _is_correlated_entry_blocked(self, candidate: str, held_symbols: list) -> bool:
+        """Return True when adding *candidate* would push the number of highly-correlated
+        positions above max_correlated_positions.  Always returns False when the feature
+        is disabled or when there are fewer current holdings than the limit."""
+        if not self.correlation_limit_enabled:
+            return False
+        if len(held_symbols) < self.max_correlated_positions:
+            return False
+        try:
+            all_syms = list({candidate} | set(held_symbols))
+            matrix = self._calc_correlation_matrix(all_syms)
+            correlated_count = 1  # candidate itself
+            for sym in held_symbols:
+                r = matrix.get(candidate, {}).get(sym, 0.0)
+                if r >= self.correlation_threshold:
+                    correlated_count += 1
+            return correlated_count > self.max_correlated_positions
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Paper account state helpers
@@ -1794,6 +1866,14 @@ class CryptoAPITrading:
             # buy_threshold defaults to 3 and can be overridden by optimizer_config.json.
             entry_threshold = int(getattr(self, "_buy_threshold", 3))
             if not (buy_count >= entry_threshold and sell_count == 0):
+                start_index += 1
+                continue
+
+            # Correlation-aware portfolio limit: skip entry when adding this coin
+            # would exceed the configured threshold of highly-correlated positions.
+            held_coins = [h["asset_code"] for h in (holdings.get("results", []) if isinstance(holdings, dict) else [])]
+            if self._is_correlated_entry_blocked(base_symbol, held_coins):
+                print(f"[correlation] skipping {base_symbol}: correlated positions at limit")
                 start_index += 1
                 continue
 
