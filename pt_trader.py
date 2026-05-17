@@ -45,7 +45,7 @@ TRADER_STATUS_PATH = os.path.join(HUB_DATA_DIR, "trader_status.json")
 TRADE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "trade_history.jsonl")
 PNL_LEDGER_PATH = os.path.join(HUB_DATA_DIR, "pnl_ledger.json")
 ACCOUNT_VALUE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "account_value_history.jsonl")
-
+OPTIMIZER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "optimizer_config.json")
 
 
 # Initialize colorama
@@ -254,7 +254,19 @@ class CryptoAPITrading:
         self._dca_last_sell_ts = {}   # { "BTC": ts_of_last_sell }
         self._seed_dca_window_from_history()
 
+        # ── risk overlays (defaults; overridden by optimizer_config.json) ──
+        self.atr_sizing_enabled    = False
+        self.atr_sizing_min_signal = 6      # only scale size when signal >= this
+        self.atr_period            = 14
+        self.atr_target_vol_pct    = 2.0    # target 2 % daily vol per position
+        self.kelly_sizing_enabled  = False
+        self.kelly_min_trades      = 20     # need at least N closed trades
+        self.stop_loss_enabled     = False
+        self.stop_loss_atr_mult    = 2.5    # stop at entry − mult×ATR
+        self.stop_loss_min_signal  = 6      # only attach stop on high-intensity entries
+        self._stop_levels: Dict[str, float] = {}  # symbol → stop price
 
+        self._apply_optimizer_config()
 
 
 
@@ -269,6 +281,108 @@ class CryptoAPITrading:
             os.replace(tmp, path)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Optimizer config & risk overlays
+    # ------------------------------------------------------------------
+
+    def _apply_optimizer_config(self) -> None:
+        """Override instance trading params from optimizer_config.json if present."""
+        try:
+            if not os.path.isfile(OPTIMIZER_CONFIG_PATH):
+                return
+            with open(OPTIMIZER_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            scalar_overrides = {
+                "buy_threshold":           int,
+                "pm_start_pct_no_dca":     float,
+                "pm_start_pct_with_dca":   float,
+                "trailing_gap_pct":        float,
+                "max_dca_buys_per_24h":    int,
+                "atr_sizing_enabled":      bool,
+                "atr_sizing_min_signal":   int,
+                "atr_period":              int,
+                "atr_target_vol_pct":      float,
+                "kelly_sizing_enabled":    bool,
+                "kelly_min_trades":        int,
+                "stop_loss_enabled":       bool,
+                "stop_loss_atr_mult":      float,
+                "stop_loss_min_signal":    int,
+            }
+            for key, cast in scalar_overrides.items():
+                if key in cfg:
+                    setattr(self, key, cast(cfg[key]))
+            if "buy_threshold" in cfg:
+                self._buy_threshold = int(cfg["buy_threshold"])
+        except Exception:
+            pass
+
+    def _calc_atr(self, symbol: str) -> float:
+        """Return ATR(atr_period) in USD using recent 1-hour KuCoin candles."""
+        try:
+            candles = _kucoin_market.get_kline(f"{symbol}-USDT", "1hour", limit=self.atr_period + 2)
+            if not candles or len(candles) < self.atr_period + 1:
+                return 0.0
+            candles = list(reversed(candles))
+            trs = []
+            for i in range(1, len(candles)):
+                high       = float(candles[i][3])
+                low        = float(candles[i][4])
+                prev_close = float(candles[i - 1][2])
+                trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+            return sum(trs[-self.atr_period :]) / self.atr_period if trs else 0.0
+        except Exception:
+            return 0.0
+
+    def _calc_kelly_fraction(self) -> float:
+        """Compute half-Kelly multiplier from closed-trade PnL history.
+        Returns 1.0 when there are insufficient trades."""
+        try:
+            pnl_list: list = []
+            if os.path.isfile(TRADE_HISTORY_PATH):
+                with open(TRADE_HISTORY_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            t = json.loads(line)
+                            if t.get("side") == "sell" and t.get("pnl_pct") is not None:
+                                pnl_list.append(float(t["pnl_pct"]))
+                        except Exception:
+                            pass
+            if len(pnl_list) < self.kelly_min_trades:
+                return 1.0
+            wins   = [p for p in pnl_list if p > 0]
+            losses = [abs(p) for p in pnl_list if p < 0]
+            if not wins or not losses:
+                return 1.0
+            w_rate   = len(wins)   / len(pnl_list)
+            l_rate   = 1.0 - w_rate
+            avg_win  = sum(wins)   / len(wins)
+            avg_loss = sum(losses) / len(losses)
+            kelly    = (w_rate / avg_loss) - (l_rate / avg_win)
+            return max(0.1, min(kelly / 2.0, 2.0))
+        except Exception:
+            return 1.0
+
+    def _apply_risk_sizing(self, symbol: str, base_usd: float, signal_level: int) -> float:
+        """Scale a base USD allocation by ATR volatility and/or Kelly fraction.
+        Only applies overlays when signal_level >= the configured minimum."""
+        result = base_usd
+        try:
+            if self.atr_sizing_enabled and signal_level >= self.atr_sizing_min_signal:
+                atr = self._calc_atr(symbol)
+                if atr > 0:
+                    price = float((_kucoin_market.get_ticker(f"{symbol}-USDT") or {}).get("price", 0) or 0)
+                    if price > 0:
+                        current_vol_pct = (atr / price) * 100.0
+                        scale = self.atr_target_vol_pct / max(current_vol_pct, 0.01)
+                        scale = max(0.25, min(scale, 2.0))
+                        result *= scale
+
+            if self.kelly_sizing_enabled:
+                result *= self._calc_kelly_fraction()
+        except Exception:
+            pass
+        return max(result, 1.0)
 
     # ------------------------------------------------------------------
     # Paper account state helpers
@@ -1413,6 +1527,35 @@ class CryptoAPITrading:
 
 
 
+            # --- ATR stop-loss (optional, high-intensity entries only) ---
+            if self.stop_loss_enabled and symbol in self._stop_levels:
+                stop_price = self._stop_levels[symbol]
+                if current_sell_price <= stop_price:
+                    print(
+                        f"  STOP-LOSS triggered for {symbol}: sell price {current_sell_price:.8f} "
+                        f"<= stop {stop_price:.8f}."
+                    )
+                    response = self.place_sell_order(
+                        str(uuid.uuid4()),
+                        "sell",
+                        "market",
+                        full_symbol,
+                        quantity,
+                        expected_price=current_sell_price,
+                        avg_cost_basis=avg_cost_basis,
+                        pnl_pct=gain_loss_percentage_sell,
+                        tag="STOP_LOSS",
+                    )
+                    if response and "errors" not in response:
+                        trades_made = True
+                        self._stop_levels.pop(symbol, None)
+                        self.trailing_pm.pop(symbol, None)
+                        self._reset_dca_window_for_trade(symbol, sold=True)
+                        print(f"  Stop-loss sell executed for {symbol}.")
+                        time.sleep(5)
+                        holdings = self.get_holdings()
+                        continue
+
             # --- Trailing profit margin (0.5% trail gap) ---
             # PM "start line" is the normal 5% / 2.5% line (depending on DCA levels hit).
             # Trailing activates once price is ABOVE the PM start line, then line follows peaks up
@@ -1471,6 +1614,7 @@ class CryptoAPITrading:
 
                         trades_made = True
                         self.trailing_pm.pop(symbol, None)  # clear per-coin trailing state on exit
+                        self._stop_levels.pop(symbol, None)  # clear stop level on exit
 
                         # Trade ended -> reset rolling 24h DCA window for this coin
                         self._reset_dca_window_for_trade(symbol, sold=True)
@@ -1628,20 +1772,22 @@ class CryptoAPITrading:
             buy_count = self._read_long_dca_signal(base_symbol)
             sell_count = self._read_short_dca_signal(base_symbol)
 
-            # Default behavior: long must be >= 3 and short must be 0
-            if not (buy_count >= 3 and sell_count == 0):
+            # Entry gate: long must be >= buy_threshold and short must be 0.
+            # buy_threshold defaults to 3 and can be overridden by optimizer_config.json.
+            entry_threshold = int(getattr(self, "_buy_threshold", 3))
+            if not (buy_count >= entry_threshold and sell_count == 0):
                 start_index += 1
                 continue
 
-
-
+            # Apply risk-overlay sizing before placing the entry order.
+            sized_allocation = self._apply_risk_sizing(base_symbol, allocation_in_usd, buy_count)
 
             response = self.place_buy_order(
                 str(uuid.uuid4()),
                 "buy",
                 "market",
                 full_symbol,
-                allocation_in_usd,
+                sized_allocation,
             )
 
             if response and "errors" not in response:
@@ -1655,10 +1801,20 @@ class CryptoAPITrading:
                 # Reset trailing PM state for this coin (fresh trade, fresh trailing logic)
                 self.trailing_pm.pop(base_symbol, None)
 
+                # Set ATR stop-loss level if enabled and signal meets threshold.
+                if self.stop_loss_enabled and buy_count >= self.stop_loss_min_signal:
+                    try:
+                        entry_atr = self._calc_atr(base_symbol)
+                        buy_prices, _, _ = self.get_price([full_symbol])
+                        entry_price = float((buy_prices or {}).get(full_symbol, 0) or 0)
+                        if entry_price > 0 and entry_atr > 0:
+                            self._stop_levels[base_symbol] = entry_price - self.stop_loss_atr_mult * entry_atr
+                    except Exception:
+                        pass
 
                 print(
                     f"Starting new trade for {full_symbol} (AI start signal long={buy_count}, short={sell_count}). "
-                    f"Allocating ${allocation_in_usd:.2f}."
+                    f"Allocating ${sized_allocation:.2f}."
                 )
                 time.sleep(5)
                 holdings = self.get_holdings()
