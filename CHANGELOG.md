@@ -57,6 +57,10 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **CLAUDE.md**: Full codebase onboarding documentation (47 → 230+ lines)
 - **README.md**: Comprehensive project README with Mermaid architecture diagrams, quick-start guide, CLI reference, and metrics examples (538 lines, created from scratch)
 
+### Phase 5: Strategy & Algorithm Enhancements (May 2026)
+- **Strategy Optimizer** (`pt_optimizer.py`): grid / random / differential-evolution search over 5 trading parameters; each trial runs a full replay subprocess scored by Sharpe/Sortino/Calmar; writes `best_config.json` for live use
+- **Risk Overlays** (`pt_trader.py`): ATR-based position sizing, Kelly-criterion position multiplier, hard ATR stop-loss for high-intensity entries; all disabled by default, configurable via `optimizer_config.json`
+
 ### Phase 4: UX/GUI Modernization & Paper Trading (May 2026)
 - **Streamlit Dashboard** (`pt_dashboard.py`): Live KPI panels, DCA signal gauges, equity curve, trade log, embedded backtest HTML reports
 - **Paper Trading Mode**: `--paper` flag in `pt_trader.py` simulates fills with live KuCoin prices, no Robinhood credentials required
@@ -957,6 +961,40 @@ Implemented two major quality-of-life features: a Streamlit analytics dashboard 
 - Weighted-average cost basis tracked per coin
 - `paper_account.json` written atomically to `hub_data/`; readable by the Streamlit dashboard in real time
 - Startup banner printed with initial balance, account path, and mode indicator
+
+---
+
+#### Strategy & Algorithm Enhancements
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #16
+**Branch:** `claude/strategy-enhancements` → `main`
+
+Adds a strategy optimizer and three risk overlays that layer on top of the existing DCA core without altering its logic.
+
+**Files Added:**
+- `pt_optimizer.py` (280 lines) — strategy optimizer
+
+**Files Modified:**
+- `pt_trader.py` — risk overlay methods + optimizer config loading + `_buy_threshold` parameterisation
+- `requirements.txt` — added `scipy`
+- `CHANGELOG.md` — Phase 5 entry
+
+**Strategy Optimizer (`pt_optimizer.py`):**
+- **Parameter space** (5 dimensions): `buy_threshold`, `pm_start_pct_no_dca`, `pm_start_pct_with_dca`, `trailing_gap_pct`, `max_dca_buys_per_24h`
+- **Search methods**: `grid` (exhaustive), `random` (sampled), `diffevo` (scipy differential evolution — best for overnight runs)
+- Each trial writes `optimizer_config.json`, runs `pt_replay.py --backtest` as subprocess, scores result using `pt_analyze` Sharpe/Sortino/Calmar functions
+- Running best written to `{output_dir}/best_config.json` after every improvement
+- Full trial log in `{output_dir}/optimizer_results.jsonl`
+- `Ctrl-C` safe — saves best found so far and cleans up `optimizer_config.json`
+
+**Risk Overlays (`pt_trader.py`):**
+- `_apply_optimizer_config()`: reads `optimizer_config.json` at startup, overrides 14 instance parameters including all new risk flags
+- `_calc_atr(symbol)`: ATR(14) from KuCoin 1-hour candles; uses module-level `_kucoin_market` client
+- `_calc_kelly_fraction()`: half-Kelly from closed trade PnL history; returns 1.0 until `kelly_min_trades` threshold is met
+- `_apply_risk_sizing(symbol, base_usd, signal_level)`: combines ATR volatility scaling and Kelly multiplier; only activates when `signal_level >= atr_sizing_min_signal` (default 6)
+- ATR stop-loss: set at `entry_price - stop_loss_atr_mult × ATR` on high-signal entries; checked each tick before DCA logic; cleared on trail-sell or stop-sell
+- All overlays **off by default** (`atr_sizing_enabled=False`, `kelly_sizing_enabled=False`, `stop_loss_enabled=False`) — enable via `optimizer_config.json`
 
 ---
 

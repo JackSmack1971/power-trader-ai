@@ -7,3 +7,4 @@ PyNaCl
 kucoin-python
 numpy
 streamlit
+scipy
