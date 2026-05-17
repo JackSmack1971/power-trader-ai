@@ -61,6 +61,7 @@ PowerTrader AI is a local, multi-process algorithmic trading system that uses a 
 - **Docker** (`Dockerfile`, `docker-compose.yml`, `.env.example`, `.dockerignore`): one-command stack with paper-trader, thinker, trainer, Streamlit dashboard, and Redis services; volume-mount for persistent cache
 - **Redis IPC** (`pt_ipc.py`): opt-in Redis pub/sub bridge with file fallback; set `REDIS_URL` to enable; wired into thinker writes and trader reads
 - **Multi-coin env var**: `POWERTRADER_COINS=BTC,ETH,DOGE` overrides `gui_settings.json` in both thinker and trader — Docker-friendly coin selection
+- **CLAUDE.md optimization**: root file slimmed from 251 → 50 lines; five modular `.claude/rules/` files injected by file-path glob on demand
 
 ### Phase 5: Strategy & Algorithm Enhancements (May 2026)
 - **Strategy Optimizer** (`pt_optimizer.py`): grid / random / differential-evolution search over 5 trading parameters; each trial runs a full replay subprocess scored by Sharpe/Sortino/Calmar; writes `best_config.json` for live use
@@ -1032,6 +1033,32 @@ docker compose --profile live up  # live trading
 ```
 
 **Redis IPC:** set `REDIS_URL=redis://redis:6379` to activate; omit for pure-local file IPC (zero new deps needed at runtime).
+
+---
+
+#### CLAUDE.md Token Optimization & Modular Rules
+**Date:** May 17, 2026
+**Author:** Claude
+**Pull Request:** #18 (merged)
+**Branch:** `claude/infrastructure` → `main`
+
+- `CLAUDE.md` trimmed from 251 lines to 50 — saves ~200 lines of context on every agent turn
+- Five modular rule files created under `.claude/rules/`, each scoped by file-path glob so rules are only injected when the agent is actively working on matching files:
+  - `ipc.md` — atomic write patterns, signal file layout, Redis IPC usage
+  - `trading-core.md` — hard-tab indent requirement, memory model, thinker/trader quirks
+  - `backtesting.md` — replay workflow, KuCoin candle index, walk-forward, test commands
+  - `changelog.md` — always-active PR merge format checklist
+  - `docker.md` — Dockerfile/compose quick start, secrets policy, volumes, Redis
+
+**Files Added:**
+- `.claude/rules/ipc.md` (44 lines)
+- `.claude/rules/trading-core.md` (27 lines)
+- `.claude/rules/backtesting.md` (47 lines)
+- `.claude/rules/changelog.md` (29 lines)
+- `.claude/rules/docker.md` (28 lines)
+
+**Files Modified:**
+- `CLAUDE.md` (251 → 50 lines)
 
 ---
 
