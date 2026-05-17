@@ -60,39 +60,39 @@ Market data comes from **KuCoin**. Everything runs locally; no cloud dependency.
 
 ```mermaid
 graph TD
-    HUB["🖥️ pt_hub.py\n(Tkinter GUI)"]
-    THINKER["🧠 pt_thinker.py\n(Pattern Matcher)"]
-    TRADER["⚡ pt_trader.py\n(Execution Engine)"]
-    TRAINER["🎓 pt_trainer.py\n(Model Builder)"]
-    KUCOIN["📈 KuCoin API\n(OHLCV market data)"]
-    ROBINHOOD["💹 Robinhood Crypto\n(order execution)"]
+    HUB["pt_hub.py (Tkinter GUI)"]
+    THINKER["pt_thinker.py (Pattern Matcher)"]
+    TRADER["pt_trader.py (Execution Engine)"]
+    TRAINER["pt_trainer.py (Model Builder)"]
+    KUCOIN["KuCoin API (OHLCV market data)"]
+    ROBINHOOD["Robinhood Crypto (order execution)"]
 
     HUB -->|subprocess.Popen| THINKER
     HUB -->|subprocess.Popen| TRADER
     HUB -->|on demand| TRAINER
 
     KUCOIN -->|candles| THINKER
-    THINKER -->|"long_dca_signal.txt\nshort_dca_signal.txt\n(int 0–7)"| TRADER
-    THINKER -->|"runner_ready.json\nbound_prices.html"| HUB
+    THINKER -->|"long/short_dca_signal.txt (int 0-7)"| TRADER
+    THINKER -->|"runner_ready.json, bound_prices.html"| HUB
     TRADER -->|Ed25519 REST| ROBINHOOD
-    TRADER -->|"trader_status.json\ntrade_history.jsonl\npnl_ledger.json"| HUB
-    TRAINER -->|"memories_*.txt\nmemory_weights_*.txt"| THINKER
+    TRADER -->|"trader_status.json, trade_history.jsonl"| HUB
+    TRAINER -->|"memories_*.txt, memory_weights_*.txt"| THINKER
 ```
 
 ### Backtesting (Replay Mode)
 
 ```mermaid
 graph TD
-    REPLAY["🔄 pt_replay.py\n(Orchestrator)"]
-    CACHE["💾 backtest_cache/\n(KuCoin OHLCV JSON)"]
-    THINKER_R["🧠 pt_thinker.py --replay\n(uses cached candles)"]
-    TRADER_R["⚡ pt_trader.py --replay\n(simulated fills)"]
-    STATE["📄 replay_data/\nbacktest_state.json"]
-    ANALYZE["📊 pt_analyze.py\n(Analytics & HTML report)"]
+    REPLAY["pt_replay.py (Orchestrator)"]
+    CACHE["backtest_cache/ (KuCoin OHLCV JSON)"]
+    THINKER_R["pt_thinker.py --replay (cached candles)"]
+    TRADER_R["pt_trader.py --replay (simulated fills)"]
+    STATE["replay_data/backtest_state.json"]
+    ANALYZE["pt_analyze.py (Analytics + HTML report)"]
 
     REPLAY -->|warm_cache| CACHE
-    REPLAY -->|"subprocess --replay"| THINKER_R
-    REPLAY -->|"subprocess --replay"| TRADER_R
+    REPLAY -->|subprocess --replay| THINKER_R
+    REPLAY -->|subprocess --replay| TRADER_R
     REPLAY -->|advance_time_atomic| STATE
     THINKER_R --> CACHE
     THINKER_R --> STATE
